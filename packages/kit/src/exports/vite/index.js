@@ -105,9 +105,6 @@ function kit() {
 	/** @type {import('types').BuildData} */
 	let build_data;
 
-	/** @type {Set<string>} */
-	let illegal_imports;
-
 	/** @type {string | undefined} */
 	let deferred_warning;
 
@@ -234,13 +231,6 @@ function kit() {
 				client_out_dir: `${svelte_config.kit.outDir}/output/client`
 			};
 
-			illegal_imports = new Set([
-				'/@id/__x00__$env/dynamic/private', //dev
-				'\0$env/dynamic/private', // prod
-				'/@id/__x00__$env/static/private', // dev
-				'\0$env/static/private' // prod
-			]);
-
 			if (is_build) {
 				manifest_data = (await sync.all(svelte_config, config_env.mode)).manifest_data;
 
@@ -321,9 +311,15 @@ function kit() {
 				case '\0$env/static/public':
 					return create_static_module('$env/static/public', env.public);
 				case '\0$env/dynamic/private':
-					return create_dynamic_module('private');
+					return create_dynamic_module(
+						'private',
+						vite_config_env.command === 'serve' ? env.private : undefined
+					);
 				case '\0$env/dynamic/public':
-					return create_dynamic_module('public');
+					return create_dynamic_module(
+						'public',
+						vite_config_env.command === 'serve' ? env.public : undefined
+					);
 			}
 		},
 
@@ -384,7 +380,7 @@ function kit() {
 						prevent_illegal_rollup_imports(
 							this.getModuleInfo.bind(this),
 							module_node,
-							illegal_imports
+							vite.normalizePath(svelte_config.kit.files.lib)
 						);
 					}
 				});
@@ -540,7 +536,7 @@ function kit() {
 				if (deferred_warning) console.error('\n' + deferred_warning);
 			};
 
-			return await dev(vite, vite_config, svelte_config, illegal_imports);
+			return await dev(vite, vite_config, svelte_config);
 		},
 
 		/**
