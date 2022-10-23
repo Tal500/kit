@@ -171,15 +171,32 @@ test.describe('Shadowed pages', () => {
 		);
 	});
 
-	test('Handles POST redirects', async ({ page }) => {
+	test('Handles GET redirects with cookies from fetch response', async ({
+		page,
+		context,
+		clicknav
+	}) => {
 		await page.goto('/shadowed');
-		await Promise.all([page.waitForNavigation(), page.click('#redirect-post')]);
+		await clicknav('[href="/shadowed/redirect-get-with-cookie-from-fetch"]');
+		expect(await page.textContent('h1')).toBe('Redirection was successful');
+
+		const cookies = await context.cookies();
+		expect(cookies).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ name: 'shadow-redirect-fetch', value: 'happy' })
+			])
+		);
+	});
+
+	test('Handles POST redirects', async ({ page, clicknav }) => {
+		await page.goto('/shadowed');
+		await clicknav('#redirect-post');
 		expect(await page.textContent('h1')).toBe('Redirection was successful');
 	});
 
-	test('Handles POST redirects with cookies', async ({ page, context }) => {
+	test('Handles POST redirects with cookies', async ({ page, context, clicknav }) => {
 		await page.goto('/shadowed');
-		await Promise.all([page.waitForNavigation(), page.click('#redirect-post-with-cookie')]);
+		await clicknav('#redirect-post-with-cookie');
 		expect(await page.textContent('h1')).toBe('Redirection was successful');
 
 		const cookies = await context.cookies();
@@ -188,9 +205,9 @@ test.describe('Shadowed pages', () => {
 		);
 	});
 
-	test('Handles POST success with returned location', async ({ page }) => {
+	test('Handles POST success with returned location', async ({ page, clicknav }) => {
 		await page.goto('/shadowed/post-success-redirect');
-		await Promise.all([page.waitForNavigation(), page.click('button')]);
+		await clicknav('button');
 		expect(await page.textContent('h1')).toBe('POST was successful');
 	});
 
@@ -291,7 +308,7 @@ test.describe('Shadowed pages', () => {
 
 			expect(await page.textContent('h1')).toBe('500');
 			expect(await page.textContent('#message')).toBe(
-				'This is your custom error page saying: "Cannot stringify arbitrary non-POJOs (data.nope)"'
+				'This is your custom error page saying: "Data returned from `load` while rendering /shadowed/serialization is not serializable: Cannot stringify arbitrary non-POJOs (data.nope)"'
 			);
 		});
 	}
@@ -559,7 +576,7 @@ test.describe('Errors', () => {
 		);
 
 		const { status, name, message, stack, fancy } = read_errors(
-			'/errors/page-endpoint/get-implicit/__data.js'
+			'/errors/page-endpoint/get-implicit/__data.json'
 		);
 		expect(status).toBe(undefined);
 		expect(name).toBe('FancyError');
@@ -589,12 +606,13 @@ test.describe('Errors', () => {
 
 	test('page endpoint POST unexpected error message is preserved', async ({
 		page,
+		clicknav,
 		read_errors
 	}) => {
 		// The case where we're submitting a POST request via a form.
 		// It should show the __error template with our message.
 		await page.goto('/errors/page-endpoint');
-		await Promise.all([page.waitForNavigation(), page.click('#post-implicit')]);
+		await clicknav('#post-implicit');
 
 		expect(await page.textContent('pre')).toBe(
 			JSON.stringify({ status: 500, message: 'oops' }, null, '  ')
@@ -614,11 +632,15 @@ test.describe('Errors', () => {
 		}
 	});
 
-	test('page endpoint POST HttpError error message is preserved', async ({ page, read_errors }) => {
+	test('page endpoint POST HttpError error message is preserved', async ({
+		page,
+		clicknav,
+		read_errors
+	}) => {
 		// The case where we're submitting a POST request via a form.
 		// It should show the __error template with our message.
 		await page.goto('/errors/page-endpoint');
-		await Promise.all([page.waitForNavigation(), page.click('#post-explicit')]);
+		await clicknav('#post-explicit');
 
 		expect(await page.textContent('pre')).toBe(
 			JSON.stringify({ status: 400, message: 'oops' }, null, '  ')
@@ -658,12 +680,14 @@ test.describe('Load', () => {
 			// by the time JS has run, hydration will have nuked these scripts
 			const script_contents = await page.innerHTML('script[data-sveltekit-fetched]');
 
-			const payload = '{"status":200,"statusText":"","headers":{},"body":"{\\"answer\\":42}"}';
+			const payload = '{"status":200,"statusText":"","headers":{},"body":"{\\"b\\":2}"}';
 
 			expect(script_contents).toBe(payload);
 		}
 
-		expect(requests.some((r) => r.endsWith('/load/serialization.json'))).toBe(false);
+		expect(requests.some((r) => r.endsWith('/load/serialization/fetched-from-shared.json'))).toBe(
+			false
+		);
 	});
 
 	test('POST fetches are serialized', async ({ page, javaScriptEnabled }) => {
@@ -787,7 +811,12 @@ test.describe('Load', () => {
 		}
 	});
 
-	test('makes credentialed fetches to endpoints by default', async ({ page, clicknav }) => {
+	test('makes credentialed fetches to endpoints by default', async ({
+		page,
+		clicknav,
+		javaScriptEnabled
+	}) => {
+		if (javaScriptEnabled) return;
 		await page.goto('/load');
 		await clicknav('[href="/load/fetch-credentialed"]');
 		expect(await page.textContent('h1')).toBe('Hello SvelteKit!');
@@ -822,9 +851,36 @@ test.describe('Load', () => {
 		}
 	});
 
-	test('exposes rawBody to endpoints', async ({ page, clicknav }) => {
-		await page.goto('/load');
-		await clicknav('[href="/load/raw-body"]');
+	test('errors when trying to access non-serialized request headers on the server', async ({
+		page,
+		read_errors
+	}) => {
+		await page.goto('/load/fetch-request-headers-invalid-access');
+
+		expect(read_errors(`/load/fetch-request-headers-invalid-access`).message).toContain(
+			'Failed to get response header "content-type" — it must be included by the `filterSerializedResponseHeaders` option'
+		);
+	});
+
+	test('exposes rawBody as a DataView to endpoints', async ({ page, clicknav }) => {
+		await page.goto('/load/raw-body');
+		await clicknav('[href="/load/raw-body/dataview"]');
+
+		expect(await page.innerHTML('.parsed')).toBe('{"oddly":{"formatted":"json"}}');
+		expect(await page.innerHTML('.raw')).toBe('{ "oddly" : { "formatted" : "json" } }');
+	});
+
+	test('exposes rawBody as a string to endpoints', async ({ page, clicknav }) => {
+		await page.goto('/load/raw-body');
+		await clicknav('[href="/load/raw-body/string"]');
+
+		expect(await page.innerHTML('.parsed')).toBe('{"oddly":{"formatted":"json"}}');
+		expect(await page.innerHTML('.raw')).toBe('{ "oddly" : { "formatted" : "json" } }');
+	});
+
+	test('exposes rawBody as a Uint8Array to endpoints', async ({ page, clicknav }) => {
+		await page.goto('/load/raw-body');
+		await clicknav('[href="/load/raw-body/uint8array"]');
 
 		expect(await page.innerHTML('.parsed')).toBe('{"oddly":{"formatted":"json"}}');
 		expect(await page.innerHTML('.raw')).toBe('{ "oddly" : { "formatted" : "json" } }');
@@ -1373,7 +1429,8 @@ test.describe('Routing', () => {
 
 	test('does not attempt client-side navigation to links with data-sveltekit-reload', async ({
 		baseURL,
-		page
+		page,
+		clicknav
 	}) => {
 		await page.goto('/routing');
 
@@ -1381,7 +1438,7 @@ test.describe('Routing', () => {
 		const requests = [];
 		page.on('request', (r) => requests.push(r.url()));
 
-		await Promise.all([page.waitForNavigation(), page.click('[href="/routing/b"]')]);
+		await clicknav('[href="/routing/b"]');
 		expect(await page.textContent('h1')).toBe('b');
 		expect(requests).toContain(`${baseURL}/routing/b`);
 	});
@@ -1608,14 +1665,29 @@ test.describe('Routing', () => {
 		await page.goto('/routing/route-id');
 		await clicknav('[href="/routing/route-id/foo"]');
 
-		expect(await page.textContent('h1')).toBe('routeId in load: routing/route-id/[x]');
-		expect(await page.textContent('h2')).toBe('routeId in store: routing/route-id/[x]');
+		expect(await page.textContent('h1')).toBe('routeId in load: /routing/route-id/[x]');
+		expect(await page.textContent('h2')).toBe('routeId in store: /routing/route-id/[x]');
 	});
 
 	test('serves a page that clashes with a root directory', async ({ page }) => {
 		await page.goto('/static');
 		expect(await page.textContent('h1')).toBe('hello');
 	});
+
+	test('shows "Not Found" in 404 case', async ({ page }) => {
+		await page.goto('/404-fallback');
+		expect(await page.textContent('h1')).toBe('404');
+		expect(await page.textContent('p')).toBe('This is your custom error page saying: "Not Found"');
+	});
+
+	if (process.platform !== 'win32') {
+		test('Respects symlinks', async ({ page, clicknav }) => {
+			await page.goto('/routing');
+			await clicknav('[href="/routing/symlink-from"]');
+
+			expect(await page.textContent('h1')).toBe('symlinked');
+		});
+	}
 });
 
 test.describe('Matchers', () => {
@@ -1712,7 +1784,7 @@ test.describe('Actions', () => {
 		}
 	});
 
-	test('Success data is returned', async ({ page }) => {
+	test('Success data as form-data is returned', async ({ page }) => {
 		await page.goto('/actions/success-data');
 
 		expect(await page.textContent('pre')).toBe(JSON.stringify(null));
@@ -1720,10 +1792,24 @@ test.describe('Actions', () => {
 		await page.type('input[name="username"]', 'foo');
 		await Promise.all([
 			page.waitForRequest((request) => request.url().includes('/actions/success-data')),
-			page.click('button')
+			page.click('button[formenctype="multipart/form-data"]')
 		]);
 
 		await expect(page.locator('pre')).toHaveText(JSON.stringify({ result: 'foo' }));
+	});
+
+	test('Success data as form-urlencoded is returned', async ({ page }) => {
+		await page.goto('/actions/success-data');
+
+		expect(await page.textContent('pre')).toBe(JSON.stringify(null));
+
+		await page.type('input[name="username"]', 'bar');
+		await Promise.all([
+			page.waitForRequest((request) => request.url().includes('/actions/success-data')),
+			page.click('button[formenctype="application/x-www-form-urlencoded"]')
+		]);
+
+		await expect(page.locator('pre')).toHaveText(JSON.stringify({ result: 'bar' }));
 	});
 
 	test('applyAction updates form prop', async ({ page, javaScriptEnabled }) => {
@@ -1784,10 +1870,11 @@ test.describe('Actions', () => {
 		}
 	});
 
-	test('use:enhance', async ({ page, app }) => {
+	test('use:enhance', async ({ page }) => {
 		await page.goto('/actions/enhance');
 
-		expect(await page.textContent('pre')).toBe(JSON.stringify(null));
+		expect(await page.textContent('pre.formdata1')).toBe(JSON.stringify(null));
+		expect(await page.textContent('pre.formdata2')).toBe(JSON.stringify(null));
 
 		await page.type('input[name="username"]', 'foo');
 		await Promise.all([
@@ -1795,7 +1882,9 @@ test.describe('Actions', () => {
 			page.click('button.form1')
 		]);
 
-		await expect(page.locator('pre')).toHaveText(JSON.stringify({ result: 'foo' }));
+		await expect(page.locator('pre.formdata1')).toHaveText(JSON.stringify({ result: 'foo' }));
+		await expect(page.locator('pre.formdata2')).toHaveText(JSON.stringify({ result: 'foo' }));
+		await expect(page.locator('input[name=username]')).toHaveValue('');
 	});
 
 	test('use:enhance abort controller', async ({ page, javaScriptEnabled }) => {
@@ -1818,7 +1907,7 @@ test.describe('Actions', () => {
 	test('use:enhance button with formAction', async ({ page, app }) => {
 		await page.goto('/actions/enhance');
 
-		expect(await page.textContent('pre')).toBe(JSON.stringify(null));
+		expect(await page.textContent('pre.formdata1')).toBe(JSON.stringify(null));
 
 		await page.type('input[name="username"]', 'foo');
 		await Promise.all([
@@ -1826,6 +1915,111 @@ test.describe('Actions', () => {
 			page.click('button.form1-register')
 		]);
 
-		await expect(page.locator('pre')).toHaveText(JSON.stringify({ result: 'register: foo' }));
+		await expect(page.locator('pre.formdata1')).toHaveText(
+			JSON.stringify({ result: 'register: foo' })
+		);
+	});
+
+	test('use:enhance button with name', async ({ page, app }) => {
+		await page.goto('/actions/enhance');
+
+		expect(await page.textContent('pre.formdata1')).toBe(JSON.stringify(null));
+
+		await Promise.all([
+			page.waitForRequest((request) => request.url().includes('/actions/enhance')),
+			page.click('button.form1-submitter')
+		]);
+
+		await expect(page.locator('pre.formdata1')).toHaveText(
+			JSON.stringify({ result: 'submitter: foo' })
+		);
+	});
+
+	test('redirect', async ({ page }) => {
+		await page.goto('/actions/redirect');
+
+		page.click('button');
+
+		await Promise.all([page.waitForResponse('/actions/redirect'), page.waitForNavigation()]);
+
+		expect(page.url()).toContain('/actions/enhance');
+	});
+});
+
+test.describe('Cookies API', () => {
+	// there's a problem running these tests in the CI with webkit,
+	// since AFAICT the browser is using http://localhost and webkit won't
+	// set a `Secure` cookie on that. So we bail...
+	test.skip(({ browserName }) => browserName === 'webkit');
+
+	test('sanity check for cookies', async ({ page }) => {
+		await page.goto('/cookies');
+		const span = page.locator('#cookie-value');
+		expect(await span.innerText()).toContain('undefined');
+	});
+
+	test('set a cookie', async ({ page }) => {
+		await page.goto('/cookies/set');
+		const span = page.locator('#cookie-value');
+		expect(await span.innerText()).toContain('teapot');
+	});
+
+	test('delete a cookie', async ({ page }) => {
+		await page.goto('/cookies/set');
+		let span = page.locator('#cookie-value');
+		expect(await span.innerText()).toContain('teapot');
+		await page.goto('/cookies/delete');
+		span = page.locator('#cookie-value');
+		expect(await span.innerText()).toContain('undefined');
+	});
+
+	test('cookies can be set with a path', async ({ page }) => {
+		await page.goto('/cookies/nested/a');
+		let span = page.locator('#cookie-value');
+		expect(await span.innerText()).toContain('teapot');
+		await page.goto('/cookies/nested/b');
+		span = page.locator('#cookie-value');
+		expect(await span.innerText()).toContain('undefined');
+		await page.goto('/cookies');
+		span = page.locator('#cookie-value');
+		expect(await span.innerText()).toContain('undefined');
+	});
+
+	test('more than one cookie can be set in one request', async ({ page }) => {
+		await page.goto('/cookies/set-more-than-one');
+		const span = page.locator('#cookie-value');
+		expect(await span.innerText()).toContain('teapot');
+		expect(await span.innerText()).toContain('jane austen');
+	});
+
+	test('default encoding and decoding', async ({ page }) => {
+		await page.goto('/cookies/encoding/set');
+		const span = page.locator('#cookie-value');
+		expect(await span.innerText()).toContain('teapot, jane austen');
+	});
+
+	test('not decoded twice', async ({ page }) => {
+		await page.goto('/cookies/encoding/not-decoded-twice');
+		const span = page.locator('#cookie-value');
+		expect(await span.innerText()).toContain('teapot%2C%20jane%20austen');
+	});
+
+	test('can be set in +layout.server.js', async ({ page }) => {
+		await page.goto('/cookies/set-in-layout');
+		const span = page.locator('#cookie-value');
+		expect(await span.innerText()).toContain('i was set in the layout load');
+	});
+
+	test('works with basic enhance', async ({ page }) => {
+		await page.goto('/cookies/enhanced/basic');
+		let span = page.locator('#cookie-value');
+		expect(await span.innerText()).toContain('undefined');
+
+		await page.click('button#teapot');
+		await expect(page.locator('#cookie-value')).toHaveText('teapot');
+
+		// setting a different value...
+		await page.click('button#janeAusten');
+		await expect(page.locator('#cookie-value')).toHaveText('Jane Austen');
 	});
 });

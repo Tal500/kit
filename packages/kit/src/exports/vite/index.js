@@ -14,7 +14,8 @@ import { generate_manifest } from '../../core/generate_manifest/index.js';
 import { runtime_directory, logger } from '../../core/utils.js';
 import { find_deps, get_default_build_config } from './build/utils.js';
 import { preview } from './preview/index.js';
-import { get_aliases, prevent_illegal_rollup_imports, get_env } from './utils.js';
+import { get_aliases, get_env } from './utils.js';
+import { prevent_illegal_rollup_imports } from './graph_analysis/index.js';
 import { fileURLToPath } from 'node:url';
 import { create_static_module, create_dynamic_module } from '../../core/env.js';
 
@@ -270,8 +271,9 @@ function kit() {
 					}
 				},
 				define: {
-					__SVELTEKIT_DEV__: 'true',
-					__SVELTEKIT_APP_VERSION_POLL_INTERVAL__: '0'
+					__SVELTEKIT_APP_VERSION_POLL_INTERVAL__: '0',
+					__SVELTEKIT_BROWSER__: config_env.ssrBuild ? 'false' : 'true',
+					__SVELTEKIT_DEV__: 'true'
 				},
 				publicDir: svelte_config.kit.files.assets,
 				resolve: {
@@ -407,6 +409,7 @@ function kit() {
 				);
 
 				log.info('Building server');
+
 				const options = {
 					cwd,
 					config: svelte_config,
@@ -423,6 +426,9 @@ function kit() {
 				/** @type {import('types').BuildData} */
 				build_data = {
 					app_dir: svelte_config.kit.appDir,
+					app_path: `${svelte_config.kit.paths.base.slice(1)}${
+						svelte_config.kit.paths.base ? '/' : ''
+					}${svelte_config.kit.appDir}`,
 					manifest_data,
 					service_worker: options.service_worker_entry_file ? 'service-worker.js' : null, // TODO make file configurable?
 					client,

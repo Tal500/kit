@@ -1,6 +1,6 @@
 {
 	"name": "@sveltejs/package",
-	"version": "1.0.0-next.3",
+	"version": "1.0.0-next.5",
 	"repository": {
 		"type": "git",
 		"url": "https://github.com/sveltejs/kit",
@@ -36,7 +36,7 @@
 		"lint": "prettier --check . --config ../../.prettierrc --ignore-path .gitignore",
 		"check": "tsc",
 		"check:all": "tsc && pnpm -r --filter=\"./**\" check",
-		"format": "npm run lint -- --write",
+		"format": "pnpm lint --write",
 		"test": "uvu test \"^index.js$\""
 	},
 	"exports": {

@@ -2,7 +2,6 @@ import { create_client } from './client.js';
 import { init } from './singletons.js';
 import { set_paths } from '../paths.js';
 import { set_public_env } from '../env-public.js';
-import { set_legacy } from '../legacy.js';
 
 /**
  * @param {{
@@ -14,13 +13,11 @@ import { set_legacy } from '../legacy.js';
  *   },
  *   target: Element;
  *   trailing_slash: import('types').TrailingSlash;
- *   legacy: boolean;
  * }} opts
  */
-export async function start({ env, hydrate, paths, target, trailing_slash, legacy }) {
+export async function start({ env, hydrate, paths, target, trailing_slash }) {
 	set_public_env(env);
 	set_paths(paths);
-	set_legacy(legacy);
 
 	const client = create_client({
 		target,

@@ -1,4 +1,4 @@
-import { devalue } from 'devalue';
+import * as devalue from 'devalue';
 import { DATA_SUFFIX } from '../../constants.js';
 import { negotiate } from '../../utils/http.js';
 import { HttpError } from '../control.js';
@@ -67,23 +67,25 @@ export function allowed_methods(mod) {
 	return allowed;
 }
 
-/** @param {any} data */
-export function data_response(data) {
+/**
+ * @param {any} data
+ * @param {import('types').RequestEvent} event
+ */
+export function data_response(data, event) {
+	const headers = {
+		'content-type': 'application/json',
+		'cache-control': 'private, no-store'
+	};
+
 	try {
-		return new Response(`window.__sveltekit_data = ${devalue(data)}`, {
-			headers: {
-				'content-type': 'application/javascript'
-			}
-		});
+		return new Response(devalue.stringify(data), { headers });
 	} catch (e) {
 		const error = /** @type {any} */ (e);
 		const match = /\[(\d+)\]\.data\.(.+)/.exec(error.path);
-		const message = match ? `${error.message} (data.${match[2]})` : error.message;
-		return new Response(`throw new Error(${JSON.stringify(message)})`, {
-			headers: {
-				'content-type': 'application/javascript'
-			}
-		});
+		const message = match
+			? `Data returned from \`load\` while rendering ${event.routeId} is not serializable: ${error.message} (data.${match[2]})`
+			: error.message;
+		return new Response(JSON.stringify(message), { headers, status: 500 });
 	}
 }
 
@@ -156,7 +158,7 @@ export function handle_fatal_error(event, options, error) {
  * @param {import('types').RequestEvent} event
  * @param {import('types').SSROptions} options
  * @param {any} error
- * @returns {App.PageError}
+ * @returns {App.Error}
  */
 export function handle_error_and_jsonify(event, options, error) {
 	if (error instanceof HttpError) {
@@ -171,8 +173,9 @@ export function handle_error_and_jsonify(event, options, error) {
  * @param {string} location
  */
 export function redirect_response(status, location) {
-	return new Response(undefined, {
+	const response = new Response(undefined, {
 		status,
 		headers: { location }
 	});
+	return response;
 }

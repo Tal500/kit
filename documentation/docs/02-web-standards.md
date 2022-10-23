@@ -18,7 +18,7 @@ Besides `fetch` itself, the [Fetch API](https://developer.mozilla.org/en-US/docs
 
 #### Request
 
-An instance of [`Request`](https://developer.mozilla.org/en-US/docs/Web/API/Request) is accessible in [hooks](/docs/hooks) and [server routes](/docs/routing#server) as `event.request`. It contains useful methods like `request.json()` and `request.formData()` for e.g. getting data that was posted to an endpoint.
+An instance of [`Request`](https://developer.mozilla.org/en-US/docs/Web/API/Request) is accessible in [hooks](/docs/hooks) and [server routes](/docs/routing#server) as `event.request`. It contains useful methods like `request.json()` and `request.formData()` for getting data that was posted to an endpoint.
 
 #### Response
 
@@ -45,13 +45,36 @@ export function GET(event) {
 }
 ```
 
+### FormData
+
+When dealing with HTML native form submissions you'll be working with [`FormData`](https://developer.mozilla.org/en-US/docs/Web/API/FormData) objects.
+
+```js
+// @errors: 2461
+/// file: src/routes/hello/+server.js
+import { json } from '@sveltejs/kit';
+
+/** @type {import('./$types').RequestHandler} */
+export async function POST(event) {
+	const body = await event.request.formData();
+
+	// log all fields
+	console.log([...body]);
+
+	return json({
+		// get a specific field's value
+		name: body.get('name') ?? 'world'
+	});
+}
+```
+
 ### Stream APIs
 
 Most of the time, your endpoints will return complete data, as in the `userAgent` example above. Sometimes, you may need to return a response that's too large to fit in memory in one go, or is delivered in chunks, and for this the platform provides [streams](https://developer.mozilla.org/en-US/docs/Web/API/Streams_API) — [ReadableStream](https://developer.mozilla.org/en-US/docs/Web/API/ReadableStream), [WritableStream](https://developer.mozilla.org/en-US/docs/Web/API/WritableStream) and [TransformStream](https://developer.mozilla.org/en-US/docs/Web/API/TransformStream).
 
 ### URL APIs
 
-URLs are represented by the [`URL`](https://developer.mozilla.org/en-US/docs/Web/API/URL) interface, which includes useful properties like `origin` and `pathname` (and, in the browser, `hash`). This interface shows up in various places — `event.url` in [hooks](/docs/hooks) and [server routes](/docs/routing#server), [`$page.url`](/docs/modules#$app-stores) in [pages](/docs/routing#pages), `from` and `to` in [`beforeNavigate` and `afterNavigate`](/docs/modules#$app-navigation) and so on.
+URLs are represented by the [`URL`](https://developer.mozilla.org/en-US/docs/Web/API/URL) interface, which includes useful properties like `origin` and `pathname` (and, in the browser, `hash`). This interface shows up in various places — `event.url` in [hooks](/docs/hooks) and [server routes](/docs/routing#server), [`$page.url`](/docs/modules#$app-stores) in [pages](/docs/routing#page), `from` and `to` in [`beforeNavigate` and `afterNavigate`](/docs/modules#$app-navigation) and so on.
 
 #### URLSearchParams
 

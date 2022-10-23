@@ -60,7 +60,7 @@ async function run_test(dir, config = {}) {
 	}
 }
 
-test('Create $types for page.js', async () => {
+test('Create $types for +page.js', async () => {
 	await run_test('simple-page-shared-only');
 });
 
@@ -129,6 +129,33 @@ test('Rewrites types for a TypeScript module without param', () => {
 		rewritten?.code,
 		`// @ts-nocheck
 
+		export const load = () => {
+			return {
+				a: 1
+			};
+		};
+	;null as any as Get;`
+	);
+});
+
+test('Rewrites types for a TypeScript module without param and jsdoc without types', () => {
+	const source = `
+		/** test */
+		export const load: Get = () => {
+			return {
+				a: 1
+			};
+		};
+	`;
+
+	const rewritten = tweak_types(source, false);
+
+	assert.equal(rewritten?.exports, ['load']);
+	assert.equal(
+		rewritten?.code,
+		`// @ts-nocheck
+
+		/** test */
 		export const load = () => {
 			return {
 				a: 1
