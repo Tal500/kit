@@ -1,9 +1,10 @@
+import { DEV } from 'esm-env';
 import { is_endpoint_request, render_endpoint } from './endpoint.js';
 import { render_page } from './page/index.js';
 import { render_response } from './page/render.js';
 import { respond_with_error } from './page/respond_with_error.js';
 import { is_form_content_type } from '../../utils/http.js';
-import { GENERIC_ERROR, handle_fatal_error, redirect_response } from './utils.js';
+import { GENERIC_ERROR, get_option, handle_fatal_error, redirect_response } from './utils.js';
 import {
 	decode_pathname,
 	decode_params,
@@ -13,17 +14,27 @@ import {
 	strip_data_suffix
 } from '../../utils/url.js';
 import { exec } from '../../utils/routing.js';
-import { INVALIDATED_HEADER, render_data } from './data/index.js';
+import { INVALIDATED_PARAM, redirect_json_response, render_data } from './data/index.js';
 import { add_cookies_to_headers, get_cookies } from './cookie.js';
 import { create_fetch } from './fetch.js';
 import { Redirect } from '../control.js';
+import {
+	validate_common_exports,
+	validate_page_server_exports,
+	validate_server_exports
+} from '../../utils/exports.js';
+import { error, json } from '../../exports/index.js';
 
 /* global __SVELTEKIT_ADAPTER_NAME__ */
 
-/** @param {{ html: string }} opts */
+/** @type {import('types').RequiredResolveOptions['transformPageChunk']} */
 const default_transform = ({ html }) => html;
 
+/** @type {import('types').RequiredResolveOptions['filterSerializedResponseHeaders']} */
 const default_filter = () => false;
+
+/** @type {import('types').RequiredResolveOptions['preload']} */
+const default_preload = ({ type }) => type === 'js' || type === 'css';
 
 /**
  * @param {Request} request
@@ -46,6 +57,7 @@ function is_origin_match(request, origin) {
 
 /** @type {import('types').Respond} */
 export async function respond(request, options, state) {
+	/** URL but stripped from the potential `/__data.json` suffix and its search param  */
 	let url = new URL(request.url);
 
 	if (options.csrf.check_origin) {
@@ -55,9 +67,11 @@ export async function respond(request, options, state) {
 			is_form_content_type(request);
 
 		if (forbidden) {
-			return new Response(`Cross-site ${request.method} form submissions are forbidden`, {
-				status: 403
-			});
+			const csrf_error = error(403, `Cross-site ${request.method} form submissions are forbidden`);
+			if (request.headers.get('accept') === 'application/json') {
+				return json(csrf_error.body, { status: csrf_error.status });
+			}
+			return new Response(csrf_error.body.message, { status: csrf_error.status });
 		}
 	}
 
@@ -82,16 +96,24 @@ export async function respond(request, options, state) {
 	}
 
 	const is_data_request = has_data_suffix(decoded);
-	if (is_data_request) decoded = strip_data_suffix(decoded) || '/';
+	/** @type {boolean[] | undefined} */
+	let invalidated_data_nodes;
+	if (is_data_request) {
+		decoded = strip_data_suffix(decoded) || '/';
+		url.pathname = strip_data_suffix(url.pathname) || '/';
+		invalidated_data_nodes = url.searchParams.get(INVALIDATED_PARAM)?.split('_').map(Boolean);
+		url.searchParams.delete(INVALIDATED_PARAM);
+	}
 
 	if (!state.prerendering?.fallback) {
+		// TODO this could theoretically break — should probably be inside a try-catch
 		const matchers = await options.manifest._.matchers();
 
 		for (const candidate of options.manifest._.routes) {
 			const match = candidate.pattern.exec(decoded);
 			if (!match) continue;
 
-			const matched = exec(match, candidate, matchers);
+			const matched = exec(match, candidate.params, matchers);
 			if (matched) {
 				route = candidate;
 				params = decode_params(matched);
@@ -100,34 +122,17 @@ export async function respond(request, options, state) {
 		}
 	}
 
-	if (route?.page && !is_data_request) {
-		const normalized = normalize_path(url.pathname, options.trailing_slash);
-
-		if (normalized !== url.pathname && !state.prerendering?.fallback) {
-			return new Response(undefined, {
-				status: 301,
-				headers: {
-					'x-sveltekit-normalize': '1',
-					location:
-						// ensure paths starting with '//' are not treated as protocol-relative
-						(normalized.startsWith('//') ? url.origin + normalized : normalized) +
-						(url.search === '?' ? '' : url.search)
-				}
-			});
-		}
-	}
+	/** @type {import('types').TrailingSlash | void} */
+	let trailing_slash = undefined;
 
 	/** @type {Record<string, string>} */
 	const headers = {};
 
-	const { cookies, new_cookies, get_cookie_header } = get_cookies(request, url, options);
-
-	if (state.prerendering && !state.prerendering.fallback) disable_search(url);
-
 	/** @type {import('types').RequestEvent} */
 	const event = {
-		cookies,
-		// @ts-expect-error this is added in the next step, because `create_fetch` needs a reference to `event`
+		// @ts-expect-error `cookies` and `fetch` need to be created after the `event` itself
+		cookies: null,
+		// @ts-expect-error
 		fetch: null,
 		getClientAddress:
 			state.getClientAddress ||
@@ -161,51 +166,160 @@ export async function respond(request, options, state) {
 				}
 			}
 		},
-		url
+		url,
+		isDataRequest: is_data_request
 	};
-
-	event.fetch = create_fetch({ event, options, state, get_cookie_header });
-
-	// TODO remove this for 1.0
-	/**
-	 * @param {string} property
-	 * @param {string} replacement
-	 * @param {string} suffix
-	 */
-	const removed = (property, replacement, suffix = '') => ({
-		get: () => {
-			throw new Error(`event.${property} has been replaced by event.${replacement}` + suffix);
-		}
-	});
-
-	const details = '. See https://github.com/sveltejs/kit/pull/3384 for details';
-
-	const body_getter = {
-		get: () => {
-			throw new Error(
-				'To access the request body use the text/json/arrayBuffer/formData methods, e.g. `body = await request.json()`' +
-					details
-			);
-		}
-	};
-
-	Object.defineProperties(event, {
-		clientAddress: removed('clientAddress', 'getClientAddress'),
-		method: removed('method', 'request.method', details),
-		headers: removed('headers', 'request.headers', details),
-		origin: removed('origin', 'url.origin'),
-		path: removed('path', 'url.pathname'),
-		query: removed('query', 'url.searchParams'),
-		body: body_getter,
-		rawBody: body_getter,
-		routeId: removed('routeId', 'route.id')
-	});
 
 	/** @type {import('types').RequiredResolveOptions} */
 	let resolve_opts = {
 		transformPageChunk: default_transform,
-		filterSerializedResponseHeaders: default_filter
+		filterSerializedResponseHeaders: default_filter,
+		preload: default_preload
 	};
+
+	try {
+		// determine whether we need to redirect to add/remove a trailing slash
+		if (route && !is_data_request) {
+			if (route.page) {
+				const nodes = await Promise.all([
+					// we use == here rather than === because [undefined] serializes as "[null]"
+					...route.page.layouts.map((n) => (n == undefined ? n : options.manifest._.nodes[n]())),
+					options.manifest._.nodes[route.page.leaf]()
+				]);
+
+				if (DEV) {
+					const layouts = nodes.slice(0, -1);
+					const page = nodes.at(-1);
+
+					for (const layout of layouts) {
+						if (layout) {
+							validate_common_exports(layout.server, /** @type {string} */ (layout.server_id));
+							validate_common_exports(
+								layout.universal,
+								/** @type {string} */ (layout.universal_id)
+							);
+						}
+					}
+
+					if (page) {
+						validate_page_server_exports(page.server, /** @type {string} */ (page.server_id));
+						validate_common_exports(page.universal, /** @type {string} */ (page.universal_id));
+					}
+				}
+
+				trailing_slash = get_option(nodes, 'trailingSlash');
+			} else if (route.endpoint) {
+				const node = await route.endpoint();
+				trailing_slash = node.trailingSlash;
+
+				if (DEV) {
+					validate_server_exports(node, /** @type {string} */ (route.endpoint_id));
+				}
+			}
+
+			const normalized = normalize_path(url.pathname, trailing_slash ?? 'never');
+
+			if (normalized !== url.pathname && !state.prerendering?.fallback) {
+				return new Response(undefined, {
+					status: 301,
+					headers: {
+						'x-sveltekit-normalize': '1',
+						location:
+							// ensure paths starting with '//' are not treated as protocol-relative
+							(normalized.startsWith('//') ? url.origin + normalized : normalized) +
+							(url.search === '?' ? '' : url.search)
+					}
+				});
+			}
+		}
+
+		const { cookies, new_cookies, get_cookie_header } = get_cookies(
+			request,
+			url,
+			options.dev,
+			trailing_slash ?? 'never'
+		);
+
+		event.cookies = cookies;
+		event.fetch = create_fetch({ event, options, state, get_cookie_header });
+
+		if (state.prerendering && !state.prerendering.fallback) disable_search(url);
+
+		const response = await options.hooks.handle({
+			event,
+			resolve: (event, opts) =>
+				resolve(event, opts).then((response) => {
+					// add headers/cookies here, rather than inside `resolve`, so that we
+					// can do it once for all responses instead of once per `return`
+					for (const key in headers) {
+						const value = headers[key];
+						response.headers.set(key, /** @type {string} */ (value));
+					}
+
+					add_cookies_to_headers(response.headers, Object.values(new_cookies));
+
+					if (state.prerendering && event.route.id !== null) {
+						response.headers.set('x-sveltekit-routeid', encodeURI(event.route.id));
+					}
+
+					return response;
+				})
+		});
+
+		// respond with 304 if etag matches
+		if (response.status === 200 && response.headers.has('etag')) {
+			let if_none_match_value = request.headers.get('if-none-match');
+
+			// ignore W/ prefix https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/If-None-Match#directives
+			if (if_none_match_value?.startsWith('W/"')) {
+				if_none_match_value = if_none_match_value.substring(2);
+			}
+
+			const etag = /** @type {string} */ (response.headers.get('etag'));
+
+			if (if_none_match_value === etag) {
+				const headers = new Headers({ etag });
+
+				// https://datatracker.ietf.org/doc/html/rfc7232#section-4.1 + set-cookie
+				for (const key of [
+					'cache-control',
+					'content-location',
+					'date',
+					'expires',
+					'vary',
+					'set-cookie'
+				]) {
+					const value = response.headers.get(key);
+					if (value) headers.set(key, value);
+				}
+
+				return new Response(undefined, {
+					status: 304,
+					headers
+				});
+			}
+		}
+
+		// Edge case: If user does `return Response(30x)` in handle hook while processing a data request,
+		// we need to transform the redirect response to a corresponding JSON response.
+		if (is_data_request && response.status >= 300 && response.status <= 308) {
+			const location = response.headers.get('location');
+			if (location) {
+				return redirect_json_response(new Redirect(/** @type {any} */ (response.status), location));
+			}
+		}
+
+		return response;
+	} catch (error) {
+		if (error instanceof Redirect) {
+			if (is_data_request) {
+				return redirect_json_response(error);
+			} else {
+				return redirect_response(error.status, error.location);
+			}
+		}
+		return await handle_fatal_error(event, options, error);
+	}
 
 	/**
 	 *
@@ -215,13 +329,6 @@ export async function respond(request, options, state) {
 	async function resolve(event, opts) {
 		try {
 			if (opts) {
-				// TODO remove for 1.0
-				if ('transformPage' in opts) {
-					throw new Error(
-						'transformPage has been replaced by transformPageChunk — see https://github.com/sveltejs/kit/pull/5657 for more information'
-					);
-				}
-
 				if ('ssr' in opts) {
 					throw new Error(
 						'ssr has been removed, set it in the appropriate +layout.js instead. See the PR for more information: https://github.com/sveltejs/kit/pull/6197'
@@ -230,7 +337,8 @@ export async function respond(request, options, state) {
 
 				resolve_opts = {
 					transformPageChunk: opts.transformPageChunk || default_transform,
-					filterSerializedResponseHeaders: opts.filterSerializedResponseHeaders || default_filter
+					filterSerializedResponseHeaders: opts.filterSerializedResponseHeaders || default_filter,
+					preload: opts.preload || default_preload
 				};
 			}
 
@@ -253,7 +361,14 @@ export async function respond(request, options, state) {
 				let response;
 
 				if (is_data_request) {
-					response = await render_data(event, route, options, state);
+					response = await render_data(
+						event,
+						route,
+						options,
+						state,
+						invalidated_data_nodes,
+						trailing_slash ?? 'never'
+					);
 				} else if (route.endpoint && (!route.page || is_endpoint_request(event))) {
 					response = await render_endpoint(event, await route.endpoint(), state);
 				} else if (route.page) {
@@ -295,7 +410,7 @@ export async function respond(request, options, state) {
 			return await fetch(request);
 		} catch (error) {
 			// HttpError from endpoint can end up here - TODO should it be handled there instead?
-			return handle_fatal_error(event, options, error);
+			return await handle_fatal_error(event, options, error);
 		} finally {
 			event.cookies.set = () => {
 				throw new Error('Cannot use `cookies.set(...)` after the response has been generated');
@@ -305,84 +420,5 @@ export async function respond(request, options, state) {
 				throw new Error('Cannot use `setHeaders(...)` after the response has been generated');
 			};
 		}
-	}
-
-	try {
-		const response = await options.hooks.handle({
-			event,
-			resolve: (event, opts) =>
-				resolve(event, opts).then((response) => {
-					// add headers/cookies here, rather than inside `resolve`, so that we
-					// can do it once for all responses instead of once per `return`
-					for (const key in headers) {
-						const value = headers[key];
-						response.headers.set(key, /** @type {string} */ (value));
-					}
-
-					if (is_data_request) {
-						// set the Vary header on __data.json requests to ensure we don't cache
-						// incomplete responses with skipped data loads
-						// https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Vary
-						const vary = response.headers.get('Vary');
-						if (vary !== '*') {
-							response.headers.append('Vary', INVALIDATED_HEADER);
-						}
-					}
-
-					add_cookies_to_headers(response.headers, Object.values(new_cookies));
-
-					if (state.prerendering && event.route.id !== null) {
-						response.headers.set('x-sveltekit-routeid', encodeURI(event.route.id));
-					}
-
-					return response;
-				}),
-			// TODO remove for 1.0
-			// @ts-expect-error
-			get request() {
-				throw new Error('request in handle has been replaced with event' + details);
-			}
-		});
-
-		// respond with 304 if etag matches
-		if (response.status === 200 && response.headers.has('etag')) {
-			let if_none_match_value = request.headers.get('if-none-match');
-
-			// ignore W/ prefix https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/If-None-Match#directives
-			if (if_none_match_value?.startsWith('W/"')) {
-				if_none_match_value = if_none_match_value.substring(2);
-			}
-
-			const etag = /** @type {string} */ (response.headers.get('etag'));
-
-			if (if_none_match_value === etag) {
-				const headers = new Headers({ etag });
-
-				// https://datatracker.ietf.org/doc/html/rfc7232#section-4.1 + set-cookie
-				for (const key of [
-					'cache-control',
-					'content-location',
-					'date',
-					'expires',
-					'vary',
-					'set-cookie'
-				]) {
-					const value = response.headers.get(key);
-					if (value) headers.set(key, value);
-				}
-
-				return new Response(undefined, {
-					status: 304,
-					headers
-				});
-			}
-		}
-
-		return response;
-	} catch (error) {
-		if (error instanceof Redirect) {
-			return redirect_response(error.status, error.location);
-		}
-		return handle_fatal_error(event, options, error);
 	}
 }

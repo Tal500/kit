@@ -24,6 +24,14 @@ export default function create_manifest_data({
 	const matchers = create_matchers(config, cwd);
 	const { nodes, routes } = create_routes_and_nodes(cwd, config, fallback);
 
+	for (const route of routes) {
+		for (const param of route.params) {
+			if (param.matcher && !matchers[param.matcher]) {
+				throw new Error(`No matcher found for parameter '${param.matcher}' in route ${route.id}`);
+			}
+		}
+	}
+
 	return {
 		assets,
 		matchers,
@@ -153,7 +161,7 @@ function create_routes_and_nodes(cwd, config, fallback) {
 				);
 			}
 
-			const { pattern, names, types, optional } = parse_route_id(id);
+			const { pattern, params } = parse_route_id(id);
 
 			/** @type {import('types').RouteData} */
 			const route = {
@@ -162,9 +170,7 @@ function create_routes_and_nodes(cwd, config, fallback) {
 
 				segment,
 				pattern,
-				names,
-				types,
-				optional,
+				params,
 
 				layout: null,
 				error: null,
@@ -194,6 +200,20 @@ function create_routes_and_nodes(cwd, config, fallback) {
 				if (file.is_dir) continue;
 				if (!file.name.startsWith('+')) continue;
 				if (!valid_extensions.find((ext) => file.name.endsWith(ext))) continue;
+
+				if (file.name.endsWith('.d.ts')) {
+					let name = file.name.slice(0, -5);
+					const ext = valid_extensions.find((ext) => name.endsWith(ext));
+					if (ext) name = name.slice(0, -ext.length);
+
+					const valid =
+						/^\+(?:(page(?:@(.*))?)|(layout(?:@(.*))?)|(error))$/.test(name) ||
+						/^\+(?:(server)|(page(?:(@[a-zA-Z0-9_-]*))?(\.server)?)|(layout(?:(@[a-zA-Z0-9_-]*))?(\.server)?))$/.test(
+							name
+						);
+
+					if (valid) continue;
+				}
 
 				const project_relative = posixify(path.relative(cwd, path.join(dir, file.name)));
 
@@ -246,9 +266,7 @@ function create_routes_and_nodes(cwd, config, fallback) {
 			const root = routes[0];
 			if (!root.leaf && !root.error && !root.layout && !root.endpoint) {
 				throw new Error(
-					// TODO adjust this error message for 1.0
-					// 'No routes found. If you are using a custom src/routes directory, make sure it is specified in svelte.config.js'
-					'The filesystem router API has changed, see https://github.com/sveltejs/kit/discussions/5774 for details'
+					'No routes found. If you are using a custom src/routes directory, make sure it is specified in svelte.config.js'
 				);
 			}
 		}
@@ -259,9 +277,7 @@ function create_routes_and_nodes(cwd, config, fallback) {
 			id: '/',
 			segment: '',
 			pattern: /^$/,
-			names: [],
-			types: [],
-			optional: [],
+			params: [],
 			parent: null,
 			layout: null,
 			error: null,
@@ -368,13 +384,6 @@ function analyze(project_relative, file, component_extensions, module_extensions
 		const pattern = /^\+(?:(page(?:@(.*))?)|(layout(?:@(.*))?)|(error))$/;
 		const match = pattern.exec(name);
 		if (!match) {
-			// TODO remove for 1.0
-			if (/^\+layout-/.test(name)) {
-				throw new Error(
-					`${project_relative} should be reimplemented with layout groups: https://kit.svelte.dev/docs/advanced-routing#advanced-layouts`
-				);
-			}
-
 			throw new Error(`Files prefixed with + are reserved (saw ${project_relative})`);
 		}
 
@@ -402,7 +411,7 @@ function analyze(project_relative, file, component_extensions, module_extensions
 			);
 		}
 
-		const kind = !!(match[1] || match[4] || match[7]) ? 'server' : 'shared';
+		const kind = !!(match[1] || match[4] || match[7]) ? 'server' : 'universal';
 
 		return {
 			kind,
@@ -468,10 +477,11 @@ function prevent_conflicts(routes) {
 			const matcher = split[i];
 			const next = split[i + 1];
 
-			permutations = [
-				...permutations.map((x) => x + next),
-				...permutations.map((x) => x + `<${matcher}>${next}`)
-			];
+			permutations = permutations.reduce((a, b) => {
+				a.push(b + next);
+				if (!(matcher === '*' && b.endsWith('//'))) a.push(b + `<${matcher}>${next}`);
+				return a;
+			}, /** @type {string[]} */ ([]));
 		}
 
 		for (const permutation of permutations) {

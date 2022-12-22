@@ -5,13 +5,14 @@ import { unwrap_promises } from '../../../utils/promises.js';
  * Calls the user's server `load` function.
  * @param {{
  *   event: import('types').RequestEvent;
+ *   options: import('types').SSROptions;
  *   state: import('types').SSRState;
  *   node: import('types').SSRNode | undefined;
  *   parent: () => Promise<Record<string, any>>;
  * }} opts
  * @returns {Promise<import('types').ServerDataNode | null>}
  */
-export async function load_server_data({ event, state, node, parent }) {
+export async function load_server_data({ event, options, state, node, parent }) {
 	if (!node?.server) return null;
 
 	const uses = {
@@ -59,11 +60,15 @@ export async function load_server_data({ event, state, node, parent }) {
 	});
 
 	const data = result ? await unwrap_promises(result) : null;
+	if (options.dev) {
+		validate_load_response(data, /** @type {string} */ (event.route.id));
+	}
 
 	return {
 		type: 'data',
 		data,
-		uses
+		uses,
+		slash: node.server.trailingSlash
 	};
 }
 
@@ -93,12 +98,11 @@ export async function load_data({
 }) {
 	const server_data_node = await server_data_promise;
 
-	if (!node?.shared?.load) {
+	if (!node?.universal?.load) {
 		return server_data_node?.data ?? null;
 	}
 
-	/** @type {import('types').LoadEvent} */
-	const load_event = {
+	const result = await node.universal.load.call(null, {
 		url: event.url,
 		params: event.params,
 		data: server_data_node?.data ?? null,
@@ -221,23 +225,11 @@ export async function load_data({
 		setHeaders: event.setHeaders,
 		depends: () => {},
 		parent
-	};
-
-	// TODO remove this for 1.0
-	Object.defineProperties(load_event, {
-		session: {
-			get() {
-				throw new Error(
-					'session is no longer available. See https://github.com/sveltejs/kit/discussions/5883'
-				);
-			},
-			enumerable: false
-		}
 	});
 
-	const data = await node.shared.load.call(null, load_event);
-
-	return data ? unwrap_promises(data) : null;
+	const data = result ? await unwrap_promises(result) : null;
+	validate_load_response(data, /** @type {string} */ (event.route.id));
+	return data;
 }
 
 /**
@@ -255,4 +247,24 @@ async function stream_to_string(stream) {
 		result += decoder.decode(value);
 	}
 	return result;
+}
+
+/**
+ * @param {any} data
+ * @param {string} [routeId]
+ */
+function validate_load_response(data, routeId) {
+	if (data != null && Object.getPrototypeOf(data) !== Object.prototype) {
+		throw new Error(
+			`a load function related to route '${routeId}' returned ${
+				typeof data !== 'object'
+					? `a ${typeof data}`
+					: data instanceof Response
+					? 'a Response object'
+					: Array.isArray(data)
+					? 'an array'
+					: 'a non-plain object'
+			}, but must return a plain object at the top level (i.e. \`return {...}\`)`
+		);
+	}
 }

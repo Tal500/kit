@@ -40,9 +40,7 @@ export async function render_page(event, route, page, options, state, resolve_op
 
 	if (is_action_json_request(event)) {
 		const node = await options.manifest._.nodes[page.leaf]();
-		if (node.server) {
-			return handle_action_json_request(event, options, node.server);
-		}
+		return handle_action_json_request(event, options, node?.server);
 	}
 
 	try {
@@ -64,13 +62,13 @@ export async function render_page(event, route, page, options, state, resolve_op
 			// (this also determines status code)
 			action_result = await handle_action_request(event, leaf_node.server);
 			if (action_result?.type === 'redirect') {
-				return redirect_response(303, action_result.location);
+				return redirect_response(action_result.status, action_result.location);
 			}
 			if (action_result?.type === 'error') {
 				const error = action_result.error;
 				status = error instanceof HttpError ? error.status : 500;
 			}
-			if (action_result?.type === 'invalid') {
+			if (action_result?.type === 'failure') {
 				status = action_result.status;
 			}
 		}
@@ -81,13 +79,37 @@ export async function render_page(event, route, page, options, state, resolve_op
 		// it's crucial that we do this before returning the non-SSR response, otherwise
 		// SvelteKit will erroneously believe that the path has been prerendered,
 		// causing functions to be omitted from the manifesst generated later
-		const should_prerender = get_option(nodes, 'prerender') ?? false;
+		const should_prerender = get_option(nodes, 'prerender');
+
 		if (should_prerender) {
 			const mod = leaf_node.server;
 			if (mod && mod.actions) {
 				throw new Error('Cannot prerender pages with actions');
 			}
 		} else if (state.prerendering) {
+			// Try to render the shell when ssr is false and prerendering not explicitly disabled.
+			// People can opt out of this behavior by explicitly setting prerender to false.
+			if (
+				should_prerender !== false &&
+				get_option(nodes, 'ssr') === false &&
+				!leaf_node.server?.actions
+			) {
+				return await render_response({
+					branch: [],
+					fetched: [],
+					page_config: {
+						ssr: false,
+						csr: get_option(nodes, 'csr') ?? true
+					},
+					status,
+					error: null,
+					event,
+					options,
+					state,
+					resolve_opts
+				});
+			}
+
 			// if the page isn't marked as prerenderable, then bail out at this point
 			return new Response(undefined, {
 				status: 204
@@ -141,6 +163,7 @@ export async function render_page(event, route, page, options, state, resolve_op
 
 					return await load_server_data({
 						event,
+						options,
 						state,
 						node,
 						parent: async () => {
@@ -223,7 +246,7 @@ export async function render_page(event, route, page, options, state, resolve_op
 					}
 
 					const status = err instanceof HttpError ? err.status : 500;
-					const error = handle_error_and_jsonify(event, options, err);
+					const error = await handle_error_and_jsonify(event, options, err);
 
 					while (i--) {
 						if (page.errors[i]) {

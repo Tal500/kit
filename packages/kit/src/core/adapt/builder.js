@@ -1,11 +1,14 @@
+import { existsSync, statSync, createReadStream, createWriteStream } from 'node:fs';
+import { pipeline } from 'node:stream';
+import { promisify } from 'node:util';
+import { fork } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import glob from 'tiny-glob';
 import zlib from 'zlib';
-import { existsSync, statSync, createReadStream, createWriteStream } from 'fs';
-import { pipeline } from 'stream';
-import { promisify } from 'util';
 import { copy, rimraf, mkdirp } from '../../utils/filesystem.js';
 import { generate_manifest } from '../generate_manifest/index.js';
 import { get_route_segments } from '../../utils/routing.js';
+import { get_env } from '../../exports/vite/utils.js';
 
 const pipe = promisify(pipeline);
 
@@ -29,6 +32,23 @@ export function create_builder({ config, build_data, routes, prerendered, log })
 
 		config,
 		prerendered,
+
+		async compress(directory) {
+			if (!existsSync(directory)) {
+				return;
+			}
+
+			const files = await glob('**/*.{html,js,json,css,svg,xml,wasm}', {
+				cwd: directory,
+				dot: true,
+				absolute: true,
+				filesOnly: true
+			});
+
+			await Promise.all(
+				files.map((file) => Promise.all([compress_file(file, 'gz'), compress_file(file, 'br')]))
+			);
+		},
 
 		async createEntries(fn) {
 			/** @type {import('types').RouteDefinition[]} */
@@ -93,24 +113,49 @@ export function create_builder({ config, build_data, routes, prerendered, log })
 
 				if (filtered.size > 0) {
 					await complete({
-						generateManifest: ({ relativePath, format }) =>
+						generateManifest: ({ relativePath }) =>
 							generate_manifest({
 								build_data,
 								relative_path: relativePath,
-								routes: Array.from(filtered),
-								format
+								routes: Array.from(filtered)
 							})
 					});
 				}
 			}
 		},
 
-		generateManifest: ({ relativePath, format }) => {
+		generateFallback(dest) {
+			// do prerendering in a subprocess so any dangling stuff gets killed upon completion
+			const script = fileURLToPath(new URL('../prerender/fallback.js', import.meta.url));
+
+			const manifest_path = `${config.kit.outDir}/output/server/manifest-full.js`;
+
+			const env = get_env(config.kit.env, 'production');
+
+			return new Promise((fulfil, reject) => {
+				const child = fork(
+					script,
+					[dest, manifest_path, JSON.stringify({ ...env.private, ...env.public })],
+					{
+						stdio: 'inherit'
+					}
+				);
+
+				child.on('exit', (code) => {
+					if (code) {
+						reject(new Error(`Could not create a fallback page — failed with code ${code}`));
+					} else {
+						fulfil(undefined);
+					}
+				});
+			});
+		},
+
+		generateManifest: ({ relativePath }) => {
 			return generate_manifest({
 				build_data,
 				relative_path: relativePath,
-				routes,
-				format
+				routes
 			});
 		},
 
@@ -126,10 +171,6 @@ export function create_builder({ config, build_data, routes, prerendered, log })
 			return `${config.kit.outDir}/output/server`;
 		},
 
-		getStaticDirectory() {
-			return config.kit.files.assets;
-		},
-
 		getAppPath() {
 			return build_data.app_path;
 		},
@@ -138,53 +179,21 @@ export function create_builder({ config, build_data, routes, prerendered, log })
 			return [...copy(`${config.kit.outDir}/output/client`, dest)];
 		},
 
-		writePrerendered(dest, { fallback } = {}) {
-			const source = `${config.kit.outDir}/output/prerendered`;
-			const files = [...copy(`${source}/pages`, dest), ...copy(`${source}/dependencies`, dest)];
-
-			if (fallback) {
-				files.push(fallback);
-				copy(`${source}/fallback.html`, `${dest}/${fallback}`);
+		// @ts-expect-error
+		writePrerendered(dest, opts) {
+			// TODO remove for 1.0
+			if (opts?.fallback) {
+				throw new Error(
+					'The fallback option no longer exists — use builder.generateFallback(fallback) instead'
+				);
 			}
 
-			return files;
+			const source = `${config.kit.outDir}/output/prerendered`;
+			return [...copy(`${source}/pages`, dest), ...copy(`${source}/dependencies`, dest)];
 		},
 
 		writeServer(dest) {
 			return copy(`${config.kit.outDir}/output/server`, dest);
-		},
-
-		// TODO remove these methods for 1.0
-		// @ts-expect-error
-		writeStatic() {
-			throw new Error(
-				`writeStatic has been removed. Please ensure you are using the latest version of ${
-					config.kit.adapter.name || 'your adapter'
-				}`
-			);
-		},
-
-		async compress(directory) {
-			if (!existsSync(directory)) {
-				return;
-			}
-
-			const files = await glob('**/*.{html,js,json,css,svg,xml,wasm}', {
-				cwd: directory,
-				dot: true,
-				absolute: true,
-				filesOnly: true
-			});
-
-			await Promise.all(
-				files.map((file) => Promise.all([compress_file(file, 'gz'), compress_file(file, 'br')]))
-			);
-		},
-
-		async prerender() {
-			throw new Error(
-				'builder.prerender() has been removed. Prerendering now takes place in the build phase — see builder.prerender and builder.writePrerendered'
-			);
 		}
 	};
 }

@@ -3,6 +3,7 @@ import colors from 'kleur';
 import path from 'path';
 import sirv from 'sirv';
 import { URL } from 'url';
+import { isCSSRequest } from 'vite';
 import { getRequest, setResponse } from '../../../exports/node/index.js';
 import { installPolyfills } from '../../../exports/node/polyfills.js';
 import { coalesce_to_error } from '../../../utils/error.js';
@@ -10,12 +11,9 @@ import { posixify, resolve_entry, to_fs } from '../../../utils/filesystem.js';
 import { load_error_page, load_template } from '../../../core/config/index.js';
 import { SVELTE_KIT_ASSETS } from '../../../constants.js';
 import * as sync from '../../../core/sync/sync.js';
-import { get_mime_lookup, runtime_base, runtime_prefix } from '../../../core/utils.js';
+import { get_mime_lookup, runtime_prefix } from '../../../core/utils.js';
 import { compact } from '../../../utils/array.js';
-
-// Vite doesn't expose this so we just copy the list for now
-// https://github.com/vitejs/vite/blob/3edd1af56e980aef56641a5a51cf2932bb580d41/packages/vite/src/node/plugins/css.ts#L96
-const style_pattern = /\.(css|less|sass|scss|styl|stylus|pcss|postcss)$/;
+import { not_found } from '../utils.js';
 
 const cwd = process.cwd();
 
@@ -28,9 +26,6 @@ const cwd = process.cwd();
 export async function dev(vite, vite_config, svelte_config) {
 	installPolyfills();
 
-	// @ts-expect-error
-	globalThis.__SVELTEKIT_BROWSER__ = false;
-
 	sync.init(svelte_config, vite_config.mode);
 
 	/** @type {import('types').Respond} */
@@ -40,6 +35,9 @@ export async function dev(vite, vite_config, svelte_config) {
 	let manifest_data;
 	/** @type {import('types').SSRManifest} */
 	let manifest;
+
+	/** @type {Error | null} */
+	let manifest_error = null;
 
 	/** @param {string} id */
 	async function resolve(id) {
@@ -54,7 +52,28 @@ export async function dev(vite, vite_config, svelte_config) {
 	}
 
 	async function update_manifest() {
-		({ manifest_data } = await sync.create(svelte_config));
+		try {
+			({ manifest_data } = await sync.create(svelte_config));
+
+			if (manifest_error) {
+				manifest_error = null;
+				vite.ws.send({ type: 'full-reload' });
+			}
+		} catch (error) {
+			manifest_error = /** @type {Error} */ (error);
+
+			console.error(colors.bold().red('Invalid routes'));
+			console.error(error);
+			vite.ws.send({
+				type: 'error',
+				err: {
+					message: manifest_error.message ?? 'Invalid routes',
+					stack: ''
+				}
+			});
+
+			return;
+		}
 
 		manifest = {
 			appDir: svelte_config.kit.appDir,
@@ -65,7 +84,8 @@ export async function dev(vite, vite_config, svelte_config) {
 				entry: {
 					file: `/@fs${runtime_prefix}/client/start.js`,
 					imports: [],
-					stylesheets: []
+					stylesheets: [],
+					fonts: []
 				},
 				legacy_assets: {
 					// No legacy support in dev mode
@@ -86,6 +106,7 @@ export async function dev(vite, vite_config, svelte_config) {
 						// these are unused in dev, it's easier to include them
 						result.imports = [];
 						result.stylesheets = [];
+						result.fonts = [];
 
 						if (node.component) {
 							result.component = async () => {
@@ -100,12 +121,13 @@ export async function dev(vite, vite_config, svelte_config) {
 							};
 						}
 
-						if (node.shared) {
-							const { module, module_node } = await resolve(node.shared);
+						if (node.universal) {
+							const { module, module_node } = await resolve(node.universal);
 
 							module_nodes.push(module_node);
 
-							result.shared = module;
+							result.universal = module;
+							result.universal_id = node.universal;
 						}
 
 						if (node.server) {
@@ -131,7 +153,7 @@ export async function dev(vite, vite_config, svelte_config) {
 								const query = parsed.searchParams;
 
 								if (
-									style_pattern.test(dep.file) ||
+									isCSSRequest(dep.file) ||
 									(query.has('svelte') && query.get('type') === 'style')
 								) {
 									try {
@@ -160,16 +182,15 @@ export async function dev(vite, vite_config, svelte_config) {
 						return {
 							id: route.id,
 							pattern: route.pattern,
-							names: route.names,
-							types: route.types,
-							optional: route.optional,
+							params: route.params,
 							page: route.page,
 							endpoint: endpoint
 								? async () => {
 										const url = path.resolve(cwd, endpoint.file);
 										return await vite.ssrLoadModule(url);
 								  }
-								: null
+								: null,
+							endpoint_id: endpoint?.file
 						};
 					})
 				),
@@ -208,7 +229,13 @@ export async function dev(vite, vite_config, svelte_config) {
 	 */
 	const watch = (event, cb) => {
 		vite.watcher.on(event, (file) => {
-			if (file.startsWith(svelte_config.kit.files.routes + path.sep)) {
+			if (
+				file.startsWith(svelte_config.kit.files.routes + path.sep) ||
+				file.startsWith(svelte_config.kit.files.params + path.sep) ||
+				// in contrast to server hooks, client hooks are written to the client manifest
+				// and therefore need rebuilding when they are added/removed
+				file.startsWith(svelte_config.kit.files.hooks.client)
+			) {
 				cb(file);
 			}
 		});
@@ -224,15 +251,41 @@ export async function dev(vite, vite_config, svelte_config) {
 		}, 100);
 	};
 
+	// flag to skip watchers if server is already restarting
+	let restarting = false;
+
 	// Debounce add/unlink events because in case of folder deletion or moves
 	// they fire in rapid succession, causing needless invocations.
 	watch('add', () => debounce(update_manifest));
 	watch('unlink', () => debounce(update_manifest));
 	watch('change', (file) => {
 		// Don't run for a single file if the whole manifest is about to get updated
-		if (timeout) return;
+		if (timeout || restarting) return;
 
 		sync.update(svelte_config, manifest_data, file);
+	});
+
+	const { appTemplate } = svelte_config.kit.files;
+	// vite client only executes a full reload if the triggering html file path is index.html
+	// kit defaults to src/app.html, so unless user changed that to index.html
+	// send the vite client a full-reload event without path being set
+	if (appTemplate !== 'index.html') {
+		vite.watcher.on('change', (file) => {
+			if (file === appTemplate && !restarting) {
+				vite.ws.send({ type: 'full-reload' });
+			}
+		});
+	}
+
+	// changing the svelte config requires restarting the dev server
+	// the config is only read on start and passed on to vite-plugin-svelte
+	// which needs up-to-date values to operate correctly
+	vite.watcher.on('change', (file) => {
+		if (path.basename(file) === 'svelte.config.js') {
+			console.log(`svelte config changed, restarting vite dev-server. changed file: ${file}`);
+			restarting = true;
+			vite.restart();
+		}
 	});
 
 	const assets = svelte_config.kit.paths.assets ? SVELTE_KIT_ASSETS : svelte_config.kit.paths.base;
@@ -240,7 +293,10 @@ export async function dev(vite, vite_config, svelte_config) {
 		dev: true,
 		etag: true,
 		maxAge: 0,
-		extensions: []
+		extensions: [],
+		setHeaders: (res) => {
+			res.setHeader('access-control-allow-origin', '*');
+		}
 	});
 
 	vite.middlewares.use(async (req, res, next) => {
@@ -302,10 +358,7 @@ export async function dev(vite, vite_config, svelte_config) {
 				}
 
 				if (!decoded.startsWith(svelte_config.kit.paths.base)) {
-					return not_found(
-						res,
-						`Not found (did you mean ${svelte_config.kit.paths.base + req.url}?)`
-					);
+					return not_found(req, res, svelte_config.kit.paths.base);
 				}
 
 				if (decoded === svelte_config.kit.paths.base + '/service-worker.js') {
@@ -330,31 +383,7 @@ export async function dev(vite, vite_config, svelte_config) {
 					? await vite.ssrLoadModule(`/${hooks_file}`)
 					: {};
 
-				// TODO remove for 1.0
-				if (!resolve_entry(hooks_file)) {
-					const old_file = resolve_entry(path.join(process.cwd(), 'src', 'hooks'));
-					if (old_file && fs.existsSync(old_file)) {
-						throw new Error(
-							`Rename your server hook file from ${posixify(
-								path.relative(process.cwd(), old_file)
-							)} to ${posixify(
-								path.relative(process.cwd(), svelte_config.kit.files.hooks.server)
-							)}${path.extname(
-								old_file
-							)} (because there's also client hooks now). See the PR for more information: https://github.com/sveltejs/kit/pull/6586`
-						);
-					}
-				}
-
 				const handle = user_hooks.handle || (({ event, resolve }) => resolve(event));
-
-				// TODO remove for 1.0
-				// @ts-expect-error
-				if (user_hooks.externalFetch) {
-					throw new Error(
-						'externalFetch has been removed — use handleFetch instead. See https://github.com/sveltejs/kit/pull/6565 for details'
-					);
-				}
 
 				/** @type {import('types').ServerHooks} */
 				const hooks = {
@@ -374,18 +403,6 @@ export async function dev(vite, vite_config, svelte_config) {
 					handleFetch: user_hooks.handleFetch || (({ request, fetch }) => fetch(request))
 				};
 
-				if (/** @type {any} */ (hooks).getContext) {
-					// TODO remove this for 1.0
-					throw new Error(
-						'The getContext hook has been removed. See https://kit.svelte.dev/docs/hooks'
-					);
-				}
-
-				if (/** @type {any} */ (hooks).serverFetch) {
-					// TODO remove this for 1.0
-					throw new Error('The serverFetch hook has been renamed to externalFetch.');
-				}
-
 				// TODO the / prefix will probably fail if outDir is outside the cwd (which
 				// could be the case in a monorepo setup), but without it these modules
 				// can get loaded twice via different URLs, which causes failures. Might
@@ -393,13 +410,6 @@ export async function dev(vite, vite_config, svelte_config) {
 				const { default: root } = await vite.ssrLoadModule(
 					`/${posixify(path.relative(cwd, `${svelte_config.kit.outDir}/generated/root.svelte`))}`
 				);
-
-				const paths = await vite.ssrLoadModule(`${runtime_base}/paths.js`);
-
-				paths.set_paths({
-					base: svelte_config.kit.paths.base,
-					assets
-				});
 
 				let request;
 
@@ -416,6 +426,27 @@ export async function dev(vite, vite_config, svelte_config) {
 				const template = load_template(cwd, svelte_config);
 				const error_page = load_error_page(svelte_config);
 
+				/** @param {{ status: number; message: string }} opts */
+				const error_template = ({ status, message }) => {
+					return error_page
+						.replace(/%sveltekit\.status%/g, String(status))
+						.replace(/%sveltekit\.error\.message%/g, message);
+				};
+
+				if (manifest_error) {
+					console.error(colors.bold().red('Invalid routes'));
+					console.error(manifest_error);
+
+					res.writeHead(500, {
+						'Content-Type': 'text/html; charset=utf-8'
+					});
+					res.end(
+						error_template({ status: 500, message: manifest_error.message ?? 'Invalid routes' })
+					);
+
+					return;
+				}
+
 				const rendered = await respond(
 					request,
 					{
@@ -424,28 +455,22 @@ export async function dev(vite, vite_config, svelte_config) {
 							check_origin: svelte_config.kit.csrf.checkOrigin
 						},
 						dev: true,
-						handle_error: (error, event) => {
-							return (
-								hooks.handleError({
-									error: new Proxy(error, {
-										get: (target, property) => {
-											if (property === 'stack') {
-												return fix_stack_trace(error);
-											}
-
-											return Reflect.get(target, property, target);
+						embedded: svelte_config.kit.embedded,
+						handle_error: async (error, event) => {
+							const error_object = await hooks.handleError({
+								error: new Proxy(error, {
+									get: (target, property) => {
+										if (property === 'stack') {
+											return fix_stack_trace(error);
 										}
-									}),
-									event,
 
-									// TODO remove for 1.0
-									// @ts-expect-error
-									get request() {
-										throw new Error(
-											'request in handleError has been replaced with event. See https://github.com/sveltejs/kit/pull/3384 for details'
-										);
+										return Reflect.get(target, property, target);
 									}
-								}) ?? { message: event.route.id != null ? 'Internal Error' : 'Not Found' }
+								}),
+								event
+							});
+							return (
+								error_object ?? { message: event.route.id != null ? 'Internal Error' : 'Not Found' }
 							);
 						},
 						hooks,
@@ -468,15 +493,11 @@ export async function dev(vite, vite_config, svelte_config) {
 							);
 						},
 						app_template_contains_nonce: template.includes('%sveltekit.nonce%'),
-						error_template: ({ status, message }) => {
-							return error_page
-								.replace(/%sveltekit\.status%/g, String(status))
-								.replace(/%sveltekit\.error\.message%/g, message);
-						},
+						error_template,
 						service_worker:
 							svelte_config.kit.serviceWorker.register &&
 							!!resolve_entry(svelte_config.kit.files.serviceWorker),
-						trailing_slash: svelte_config.kit.trailingSlash
+						version: svelte_config.kit.version.name
 					},
 					{
 						getClientAddress: () => {
@@ -504,21 +525,11 @@ export async function dev(vite, vite_config, svelte_config) {
 	};
 }
 
-/** @param {import('http').ServerResponse} res */
-function not_found(res, message = 'Not found') {
-	res.statusCode = 404;
-	res.end(message);
-}
-
 /**
  * @param {import('connect').Server} server
  */
 function remove_static_middlewares(server) {
-	// We don't use viteServePublicMiddleware because of the following issues:
-	// https://github.com/vitejs/vite/issues/9260
-	// https://github.com/vitejs/vite/issues/9236
-	// https://github.com/vitejs/vite/issues/9234
-	const static_middlewares = ['viteServePublicMiddleware', 'viteServeStaticMiddleware'];
+	const static_middlewares = ['viteServeStaticMiddleware'];
 	for (let i = server.stack.length - 1; i > 0; i--) {
 		// @ts-expect-error using internals
 		if (static_middlewares.includes(server.stack[i].handle.name)) {

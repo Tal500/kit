@@ -41,7 +41,7 @@ function simplify_node(node) {
 	const simplified = {};
 
 	if (node.component) simplified.component = node.component;
-	if (node.shared) simplified.shared = node.shared;
+	if (node.universal) simplified.universal = node.universal;
 	if (node.server) simplified.server = node.server;
 	if (node.parent_id !== undefined) simplified.parent_id = node.parent_id;
 
@@ -87,7 +87,7 @@ test('creates routes', () => {
 		},
 		{
 			id: '/blog.json',
-			pattern: '/^/blog.json$/',
+			pattern: '/^/blog.json/?$/',
 			endpoint: { file: 'samples/basic/blog.json/+server.js' }
 		},
 		{
@@ -97,7 +97,7 @@ test('creates routes', () => {
 		},
 		{
 			id: '/blog/[slug].json',
-			pattern: '/^/blog/([^/]+?).json$/',
+			pattern: '/^/blog/([^/]+?).json/?$/',
 			endpoint: {
 				file: 'samples/basic/blog/[slug].json/+server.ts'
 			}
@@ -308,7 +308,7 @@ test('allows rest parameters inside segments', () => {
 		},
 		{
 			id: '/[...rest].json',
-			pattern: '/^/(.*?).json$/',
+			pattern: '/^/(.*?).json/?$/',
 			endpoint: {
 				file: 'samples/rest-prefix-suffix/[...rest].json/+server.js'
 			}
@@ -386,6 +386,35 @@ test('optional parameters', () => {
 	]);
 });
 
+test('nested optionals', () => {
+	const { nodes, routes } = create('samples/nested-optionals');
+	assert.equal(nodes.map(simplify_node), [
+		default_layout,
+		default_error,
+		{ component: 'samples/nested-optionals/[[a]]/[[b]]/+page.svelte' }
+	]);
+
+	assert.equal(routes.map(simplify_route), [
+		{
+			id: '/',
+			pattern: '/^/$/'
+		},
+		{
+			id: '/[[a]]/[[b]]',
+			pattern: '/^(?:/([^/]+))?(?:/([^/]+))?/?$/',
+			page: {
+				layouts: [0],
+				errors: [1],
+				leaf: nodes.findIndex((node) => node.component?.includes('/[[a]]/[[b]]'))
+			}
+		},
+		{
+			id: '/[[a]]',
+			pattern: '/^(?:/([^/]+))?/?$/'
+		}
+	]);
+});
+
 test('ignores files and directories with leading underscores', () => {
 	const { routes } = create('samples/hidden-underscore');
 
@@ -408,7 +437,7 @@ test('allows multiple slugs', () => {
 	assert.equal(routes.filter((route) => route.endpoint).map(simplify_route), [
 		{
 			id: '/[file].[ext]',
-			pattern: '/^/([^/]+?).([^/]+?)$/',
+			pattern: '/^/([^/]+?).([^/]+?)/?$/',
 			endpoint: {
 				file: 'samples/multiple-slugs/[file].[ext]/+server.js'
 			}
@@ -467,7 +496,7 @@ test('works with custom extensions', () => {
 		},
 		{
 			id: '/blog.json',
-			pattern: '/^/blog.json$/',
+			pattern: '/^/blog.json/?$/',
 			endpoint: {
 				file: 'samples/custom-extension/blog.json/+server.js'
 			}
@@ -479,7 +508,7 @@ test('works with custom extensions', () => {
 		},
 		{
 			id: '/blog/[slug].json',
-			pattern: '/^/blog/([^/]+?).json$/',
+			pattern: '/^/blog/([^/]+?).json/?$/',
 			endpoint: {
 				file: 'samples/custom-extension/blog/[slug].json/+server.js'
 			}
@@ -552,7 +581,7 @@ test('creates routes with named layouts', () => {
 		default_error, // 1
 		{
 			component: 'samples/named-layouts/(special)/+layout.svelte',
-			shared: 'samples/named-layouts/(special)/+layout.js',
+			universal: 'samples/named-layouts/(special)/+layout.js',
 			server: 'samples/named-layouts/(special)/+layout.server.js'
 		}, // 2
 		{ component: 'samples/named-layouts/(special)/(alsospecial)/+layout.svelte' }, // 3
@@ -627,9 +656,9 @@ test('handles pages without .svelte file', () => {
 		default_error,
 		{ component: 'samples/page-without-svelte-file/error/+error.svelte' },
 		{ component: 'samples/page-without-svelte-file/layout/+layout.svelte' },
-		{ ...default_layout, shared: 'samples/page-without-svelte-file/layout/exists/+layout.js' },
+		{ ...default_layout, universal: 'samples/page-without-svelte-file/layout/exists/+layout.js' },
 		{ component: 'samples/page-without-svelte-file/+page.svelte' },
-		{ shared: 'samples/page-without-svelte-file/error/[...path]/+page.js' },
+		{ universal: 'samples/page-without-svelte-file/error/[...path]/+page.js' },
 		{ component: 'samples/page-without-svelte-file/layout/exists/+page.svelte' },
 		{ server: 'samples/page-without-svelte-file/layout/redirect/+page.server.js' }
 	]);
@@ -719,14 +748,6 @@ test('prevents route conflicts between groups', () => {
 	assert.throws(
 		() => create('samples/conflicting-groups'),
 		/The "\/\(x\)\/a" and "\/\(y\)\/a" routes conflict with each other/
-	);
-});
-
-// TODO remove for 1.0
-test('errors on encountering a declared layout', () => {
-	assert.throws(
-		() => create('samples/declared-layout'),
-		/samples\/declared-layout\/\+layout-foo.svelte should be reimplemented with layout groups: https:\/\/kit\.svelte\.dev\/docs\/advanced-routing#advanced-layouts/
 	);
 });
 

@@ -9,7 +9,6 @@
 
 <form class="search-container" action="/search">
 	<input
-		id="search"
 		value={q}
 		on:input={(e) => {
 			$searching = true;
@@ -21,14 +20,15 @@
 		type="search"
 		name="q"
 		placeholder="Search{has_search_support ? '' : ' (N/A)'}"
+		aria-label="Search"
 		spellcheck="false"
 		disabled={!has_search_support || undefined}
 	/>
 
 	{#if browser && has_search_support}
-		<label for="#search">
+		<div class="shortcut">
 			<kbd>{navigator.platform === 'MacIntel' ? '⌘' : 'Ctrl'}</kbd> <kbd>K</kbd>
-		</label>
+		</div>
 	{/if}
 </form>
 
@@ -52,7 +52,7 @@
 
 	input {
 		padding: 0.5em 0.5em 0.4em 2em;
-		border: 1px solid #ccc;
+		border: 1px solid var(--sk-back-translucent);
 		font-family: inherit;
 		font-size: 1.4rem;
 		/* text-align: center; */
@@ -60,15 +60,16 @@
 		-webkit-appearance: none;
 		width: 100%;
 		height: 3.2rem;
-		border-radius: var(--border-r);
+		border-radius: var(--sk-border-radius);
 		background: no-repeat 1rem 50% / 1em 1em url(../icons/search.svg);
+		color: var(--sk-text-3);
 	}
 
 	input:disabled {
 		background-color: #aaaaaa;
 	}
 
-	input:focus + label {
+	input:focus + .shortcut {
 		display: none;
 	}
 
@@ -77,8 +78,8 @@
 		text-transform: uppercase;
 	}
 
-	label {
-		color: #666;
+	.shortcut {
+		color: var(--sk-text-3);
 		position: absolute;
 		top: calc(50% - 0.9rem);
 		right: 0;
@@ -92,10 +93,10 @@
 
 	kbd {
 		display: none;
-		background: #eee;
-		border: 1px solid #ddd;
+		background: var(--sk-back-2);
+		border: 1px solid var(--sk-back-translucent);
 		padding: 0.2rem 0.2rem 0rem 0.2rem;
-		color: #666;
+		color: var(--sk-text-3);
 		font-size: inherit;
 		font-family: inherit;
 		border-radius: 2px;
@@ -106,7 +107,7 @@
 			width: 11rem;
 		}
 
-		label {
+		.shortcut {
 			padding: 0 1.6rem 0 0;
 		}
 

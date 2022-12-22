@@ -11,17 +11,23 @@ import { logger } from '../utils.js';
 import { load_config } from '../config/index.js';
 import { get_route_segments } from '../../utils/routing.js';
 import { get_option } from '../../runtime/server/utils.js';
+import {
+	validate_common_exports,
+	validate_page_server_exports,
+	validate_server_exports
+} from '../../utils/exports.js';
 
 const [, , client_out_dir, manifest_path, results_path, verbose, env] = process.argv;
 
 prerender();
 
 /**
- * @template T
+ * @template {{message: string}} T
+ * @template {Omit<T, 'message'>} K
  * @param {import('types').Logger} log
  * @param {'fail' | 'warn' | 'ignore' | ((details: T) => void)} input
- * @param {(details: T) => string} format
- * @returns {(details: T) => void}
+ * @param {(details: K) => string} format
+ * @returns {(details: K) => void}
  */
 function normalise_error_handler(log, input, format) {
 	switch (input) {
@@ -36,6 +42,7 @@ function normalise_error_handler(log, input, format) {
 		case 'ignore':
 			return () => {};
 		default:
+			// @ts-expect-error TS thinks T might be of a different kind, but it's not
 			return (details) => input({ ...details, message: format(details) });
 	}
 }
@@ -77,30 +84,12 @@ export async function prerender() {
 	/** @type {import('types').ValidatedKitConfig} */
 	const config = (await load_config()).kit;
 
-	if (!config.prerender.enabled) {
-		output_and_exit({ prerendered, prerender_map });
-		return;
-	}
-
 	/** @type {import('types').Logger} */
 	const log = logger({
 		verbose: verbose === 'true'
 	});
 
 	installPolyfills();
-
-	// TODO remove this for 1.0
-	const { fetch } = globalThis;
-	globalThis.fetch = async (info, init) => {
-		const url = info instanceof Request ? info.url : info.toString();
-
-		if (url.startsWith(config.prerender.origin + '/')) {
-			const sliced = url.slice(config.prerender.origin.length);
-			throw new Error(`Use \`event.fetch('${sliced}')\` instead of the global \`fetch('${url}')\``);
-		}
-
-		return fetch(info, init);
-	};
 
 	const server_root = join(config.outDir, 'output');
 
@@ -111,8 +100,8 @@ export async function prerender() {
 	const manifest = (await import(pathToFileURL(manifest_path).href)).manifest;
 
 	override({
+		building: true,
 		paths: config.paths,
-		prerendering: true,
 		read: (file) => readFileSync(join(config.files.assets, file))
 	});
 
@@ -137,7 +126,7 @@ export async function prerender() {
 		config.prerender.handleMissingId,
 		({ path, id, referrers }) => {
 			return (
-				`The following pages contain links to ${path}#${id}, but no element with id="${id}" exists on ${path}:` +
+				`The following pages contain links to ${path}#${id}, but no element with id="${id}" exists on ${path} - see the \`handleMissingId\` option in https://kit.svelte.dev/docs/configuration#prerender for more info:` +
 				referrers.map((l) => `\n  - ${l}`).join('')
 			);
 		}
@@ -262,11 +251,13 @@ export async function prerender() {
 				}
 
 				if (hash) {
-					if (!expected_hashlinks.has(pathname + hash)) {
-						expected_hashlinks.set(pathname + hash, new Set());
+					const key = decodeURI(pathname + hash);
+
+					if (!expected_hashlinks.has(key)) {
+						expected_hashlinks.set(key, new Set());
 					}
 
-					/** @type {Set<string>} */ (expected_hashlinks.get(pathname + hash)).add(decoded);
+					/** @type {Set<string>} */ (expected_hashlinks.get(key)).add(decoded);
 				}
 
 				enqueue(decoded, decodeURI(pathname), pathname);
@@ -360,34 +351,54 @@ export async function prerender() {
 	}
 
 	for (const route of manifest._.routes) {
-		try {
-			if (route.endpoint) {
-				const mod = await route.endpoint();
-				if (mod.prerender !== undefined) {
-					if (mod.prerender && (mod.POST || mod.PATCH || mod.PUT || mod.DELETE)) {
-						throw new Error(
-							`Cannot prerender a +server file with POST, PATCH, PUT, or DELETE (${route.id})`
-						);
-					}
+		if (route.endpoint) {
+			const mod = await route.endpoint();
+			if (mod.prerender !== undefined) {
+				validate_server_exports(mod, route.id);
 
-					prerender_map.set(route.id, mod.prerender);
+				if (mod.prerender && (mod.POST || mod.PATCH || mod.PUT || mod.DELETE)) {
+					throw new Error(
+						`Cannot prerender a +server file with POST, PATCH, PUT, or DELETE (${route.id})`
+					);
+				}
+
+				prerender_map.set(route.id, mod.prerender);
+			}
+		}
+
+		if (route.page) {
+			const nodes = await Promise.all(
+				[...route.page.layouts, route.page.leaf].map((n) => {
+					if (n !== undefined) return manifest._.nodes[n]();
+				})
+			);
+
+			const layouts = nodes.slice(0, -1);
+			const page = nodes.at(-1);
+
+			for (const layout of layouts) {
+				if (layout) {
+					validate_common_exports(layout.server, route.id);
+					validate_common_exports(layout.universal, route.id);
 				}
 			}
 
-			if (route.page) {
-				const nodes = await Promise.all(
-					[...route.page.layouts, route.page.leaf].map((n) => {
-						if (n !== undefined) return manifest._.nodes[n]();
-					})
-				);
-				const prerender = get_option(nodes, 'prerender') ?? false;
-
-				prerender_map.set(route.id, prerender);
+			if (page) {
+				validate_page_server_exports(page.server, route.id);
+				validate_common_exports(page.universal, route.id);
 			}
-		} catch (e) {
-			// We failed to import the module, which indicates it can't be prerendered
-			// TODO should we catch these? It's almost certainly a bug in the app
-			console.error(e);
+
+			const should_prerender = get_option(nodes, 'prerender');
+			const prerender =
+				should_prerender === true ||
+				// Try prerendering if ssr is false and no server needed. Set it to 'auto' so that
+				// the route is not removed from the manifest, there could be a server load function.
+				// People can opt out of this behavior by explicitly setting prerender to false
+				(should_prerender !== false && get_option(nodes, 'ssr') === false && !page?.server?.actions
+					? 'auto'
+					: false);
+
+			prerender_map.set(route.id, prerender);
 		}
 	}
 
@@ -438,18 +449,6 @@ export async function prerender() {
 			)}\n\nSee https://kit.svelte.dev/docs/page-options#prerender-troubleshooting for info on how to solve this`
 		);
 	}
-
-	const rendered = await server.respond(new Request(config.prerender.origin + '/[fallback]'), {
-		getClientAddress,
-		prerendering: {
-			fallback: true,
-			dependencies: new Map()
-		}
-	});
-
-	const file = `${config.outDir}/output/prerendered/fallback.html`;
-	mkdirp(dirname(file));
-	writeFileSync(file, await rendered.text());
 
 	output_and_exit({ prerendered, prerender_map });
 }
