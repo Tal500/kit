@@ -1,10 +1,11 @@
-import { rmSync } from 'fs';
-import { join } from 'path';
+import { rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { test } from 'uvu';
 import * as assert from 'uvu/assert';
 import glob from 'tiny-glob/sync.js';
 import { create_builder } from './builder.js';
-import { fileURLToPath } from 'url';
+import { posixify } from '../../utils/filesystem.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = join(__filename, '..');
@@ -29,11 +30,15 @@ test('copy files', () => {
 		config: /** @type {import('types').ValidatedConfig} */ (mocked),
 		// @ts-expect-error
 		build_data: {},
-		routes: [],
+		// @ts-expect-error
+		server_metadata: {},
+		route_data: [],
 		// @ts-expect-error
 		prerendered: {
 			paths: []
 		},
+		// @ts-expect-error
+		prerender_map: {},
 		// @ts-expect-error
 		log: {}
 	});
@@ -41,7 +46,11 @@ test('copy files', () => {
 	const dest = join(__dirname, 'output');
 
 	rmSync(dest, { recursive: true, force: true });
-	builder.writeClient(dest);
+
+	assert.equal(
+		builder.writeClient(dest),
+		glob('**', { cwd: dest, dot: true, filesOnly: true }).map(posixify)
+	);
 
 	assert.equal(
 		glob('**', { cwd: `${outDir}/output/client`, dot: true }),
@@ -49,7 +58,11 @@ test('copy files', () => {
 	);
 
 	rmSync(dest, { recursive: true, force: true });
-	builder.writeServer(dest);
+
+	assert.equal(
+		builder.writeServer(dest),
+		glob('**', { cwd: dest, dot: true, filesOnly: true }).map(posixify)
+	);
 
 	assert.equal(
 		glob('**', { cwd: `${outDir}/output/server`, dot: true }),

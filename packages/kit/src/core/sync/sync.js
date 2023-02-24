@@ -1,7 +1,6 @@
-import path from 'path';
+import path from 'node:path';
 import create_manifest_data from './create_manifest_data/index.js';
 import { write_client_manifest } from './write_client_manifest.js';
-import { write_matchers } from './write_matchers.js';
 import { write_root } from './write_root.js';
 import { write_tsconfig } from './write_tsconfig.js';
 import { write_types, write_all_types } from './write_types/index.js';
@@ -27,10 +26,9 @@ export async function create(config) {
 
 	const output = path.join(config.kit.outDir, 'generated');
 
-	write_client_manifest(config, manifest_data, output);
+	write_client_manifest(config.kit, manifest_data, `${output}/client`);
 	write_server(config, output);
 	write_root(manifest_data, output);
-	write_matchers(manifest_data, output);
 	await write_all_types(config, manifest_data);
 
 	return { manifest_data };
@@ -51,7 +49,7 @@ export async function update(config, manifest_data, file) {
 }
 
 /**
- * Run sync.init and sync.update in series, returning the result from sync.update.
+ * Run sync.init and sync.create in series, returning the result from sync.create.
  * @param {import('types').ValidatedConfig} config
  * @param {string} mode The Vite mode
  */
@@ -61,7 +59,18 @@ export async function all(config, mode) {
 }
 
 /**
- * Regenerate server-internal.js in response to src/{app.html,error.html,service-worker.js} changing
+ * Run sync.init and then generate all type files.
+ * @param {import('types').ValidatedConfig} config
+ * @param {string} mode The Vite mode
+ */
+export async function all_types(config, mode) {
+	init(config, mode);
+	const manifest_data = create_manifest_data({ config });
+	await write_all_types(config, manifest_data);
+}
+
+/**
+ * Regenerate __SERVER__/internal.js in response to src/{app.html,error.html,service-worker.js} changing
  * @param {import('types').ValidatedConfig} config
  */
 export function server(config) {

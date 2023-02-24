@@ -1,0 +1,28 @@
+{
+	"env": {
+		"es2022": true
+	},
+	"parserOptions": {
+		"ecmaVersion": "latest",
+		"sourceType": "module"
+	},
+	"plugins": ["unicorn"],
+	"root": true,
+	"rules": {
+		"unicorn/prefer-node-protocol": "error"
+	},
+	"overrides": [{
+		"files": ["packages/kit/src/runtime/app/*.js", "packages/kit/src/runtime/client/*.js"],
+		"env": {
+			"browser": true
+		},
+		"settings": {
+			"polyfills": ["URL", "URLSearchParams", "Promise", "fetch", "AbortController", "IntersectionObserver"]
+		},
+		"plugins": ["compat", "unicorn"],
+		"rules": {
+			"compat/compat": "error",
+			"unicorn/prefer-node-protocol": "error"
+		}
+	}]
+}

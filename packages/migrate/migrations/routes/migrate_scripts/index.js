@@ -1,14 +1,7 @@
 import ts from 'typescript';
-import {
-	adjust_imports,
-	guess_indent,
-	comment,
-	error,
-	dedent,
-	parse,
-	except_str
-} from '../utils.js';
+import { adjust_imports, error, parse } from '../utils.js';
 import * as TASKS from '../tasks.js';
+import { comment, dedent, except_str, guess_indent } from '../../../utils.js';
 
 /**
  * @param {string} content
@@ -87,7 +80,7 @@ export function migrate_scripts(content, is_error, moved) {
 				return '';
 			}
 
-			if (!is_error && /export/.test(contents)) {
+			if (!is_error && /export let [\w]+[^"`'\w\s]/.test(contents)) {
 				contents = `\n${indent}${error('Add data prop', TASKS.PAGE_DATA_PROP)}\n${contents}`;
 				// Possible TODO: migrate props to data.prop, or suggest $: ({propX, propY, ...} = data);
 			}

@@ -1,4 +1,3 @@
-import { OutputAsset, OutputChunk } from 'rollup';
 import { SvelteComponent } from 'svelte/internal';
 import {
 	Config,
@@ -7,7 +6,6 @@ import {
 	HandleServerError,
 	KitConfig,
 	Load,
-	RequestEvent,
 	RequestHandler,
 	ResolveOptions,
 	Server,
@@ -31,7 +29,9 @@ export interface ServerModule {
 
 export interface ServerInternalModule {
 	set_building(building: boolean): void;
-	set_paths(paths: { base: string; assets: string }): void;
+	set_assets(path: string): void;
+	set_private_env(environment: Record<string, string>): void;
+	set_public_env(environment: Record<string, string>): void;
 	set_version(version: string): void;
 	set_fix_stack_trace(fix_stack_trace: (stack: string) => string): void;
 }
@@ -42,32 +42,29 @@ export interface Asset {
 	type: string | null;
 }
 
+export interface AssetDependencies {
+	file: string;
+	imports: string[];
+	stylesheets: string[];
+	fonts: string[];
+}
+
+export interface AssetDependenciesWithLegacy extends AssetDependencies {
+	legacy_file: string | null;
+}
+
 export interface BuildData {
 	app_dir: string;
 	app_path: string;
 	manifest_data: ManifestData;
 	service_worker: string | null;
 	client: {
-		assets: OutputAsset[];
-		chunks: OutputChunk[];
-		entry: {
-			file: string;
-			imports: string[];
-			stylesheets: string[];
-			fonts: string[];
-		};
-		legacy_assets: {
-			legacy_entry_file: string | null;
-			legacy_polyfills_file: string | null;
-			modern_polyfills_file: string | null;
-		};
-		vite_manifest: import('vite').Manifest;
-	};
-	server: {
-		chunks: OutputChunk[];
-		methods: Record<string, HttpMethod[]>;
-		vite_manifest: import('vite').Manifest;
-	};
+		start: AssetDependenciesWithLegacy;
+		app: AssetDependenciesWithLegacy;
+		legacy_polyfills_file: string | null;
+		modern_polyfills_file: string | null;
+	} | null;
+	server_manifest: import('vite').Manifest;
 }
 
 export interface CSRPageNode {
@@ -76,7 +73,6 @@ export interface CSRPageNode {
 		load?: Load;
 		trailingSlash?: TrailingSlash;
 	};
-	has_server_load: boolean;
 }
 
 export type CSRPageNodeLoader = () => Promise<CSRPageNode>;
@@ -89,9 +85,14 @@ export type CSRRoute = {
 	id: string;
 	exec(path: string): undefined | Record<string, string>;
 	errors: Array<CSRPageNodeLoader | undefined>;
-	layouts: Array<[boolean, CSRPageNodeLoader] | undefined>;
-	leaf: [boolean, CSRPageNodeLoader];
+	layouts: Array<[has_server_load: boolean, node_loader: CSRPageNodeLoader] | undefined>;
+	leaf: [has_server_load: boolean, node_loader: CSRPageNodeLoader];
 };
+
+export interface Deferred {
+	fulfil: (value: any) => void;
+	reject: (error: Error) => void;
+}
 
 export type GetParams = (match: RegExpExecArray) => Record<string, string>;
 
@@ -103,6 +104,11 @@ export interface ServerHooks {
 
 export interface ClientHooks {
 	handleError: HandleClientError;
+}
+
+export interface Env {
+	private: Record<string, string>;
+	public: Record<string, string>;
 }
 
 export class InternalServer extends Server {
@@ -202,18 +208,20 @@ export interface RouteData {
 	} | null;
 }
 
-export type ServerData =
-	| {
-			type: 'redirect';
-			location: string;
-	  }
-	| {
-			type: 'data';
-			/**
-			 * If `null`, then there was no load function
-			 */
-			nodes: Array<ServerDataNode | ServerDataSkippedNode | ServerErrorNode | null>;
-	  };
+export type ServerRedirectNode = {
+	type: 'redirect';
+	location: string;
+};
+
+export type ServerNodesResponse = {
+	type: 'data';
+	/**
+	 * If `null`, then there was no load function <- TODO is this outdated now with the recent changes?
+	 */
+	nodes: Array<ServerDataNode | ServerDataSkippedNode | ServerErrorNode | null>;
+};
+
+export type ServerDataResponse = ServerRedirectNode | ServerNodesResponse;
 
 /**
  * Signals a successful response of the server `load` function.
@@ -222,9 +230,23 @@ export type ServerData =
  */
 export interface ServerDataNode {
 	type: 'data';
+	/**
+	 * The serialized version of this contains a serialized representation of any deferred promises,
+	 * which will be resolved later through chunk nodes.
+	 */
 	data: Record<string, any> | null;
 	uses: Uses;
 	slash?: TrailingSlash;
+}
+
+/**
+ * Resolved data/error of a deferred promise.
+ */
+export interface ServerDataChunkNode {
+	type: 'chunk';
+	id: number;
+	data?: Record<string, any>;
+	error?: any;
 }
 
 /**
@@ -247,6 +269,18 @@ export interface ServerErrorNode {
 	status?: number;
 }
 
+export interface ServerMetadata {
+	nodes: Array<{ has_server_load: boolean }>;
+	routes: Map<
+		string,
+		{
+			prerender: PrerenderOption | undefined;
+			methods: HttpMethod[];
+			config: any;
+		}
+	>;
+}
+
 export interface SSRComponent {
 	default: {
 		render(props: Record<string, any>): {
@@ -264,7 +298,7 @@ export type SSRComponentLoader = () => Promise<SSRComponent>;
 
 export interface SSRNode {
 	component: SSRComponentLoader;
-	/** index into the `components` array in client-manifest.js */
+	/** index into the `components` array in client/manifest.js */
 	index: number;
 	/** client-side module URL for this component */
 	file: string;
@@ -283,6 +317,7 @@ export interface SSRNode {
 		ssr?: boolean;
 		csr?: boolean;
 		trailingSlash?: TrailingSlash;
+		config?: any;
 	};
 
 	server: {
@@ -292,11 +327,11 @@ export interface SSRNode {
 		csr?: boolean;
 		trailingSlash?: TrailingSlash;
 		actions?: Actions;
+		config?: any;
 	};
 
-	// store this in dev so we can print serialization errors
-	universal_id?: string;
-	server_id?: string;
+	universal_id: string;
+	server_id: string;
 }
 
 export type SSRNodeLoader = () => Promise<SSRNode>;
@@ -311,9 +346,16 @@ export interface SSROptions {
 	root: SSRComponent['default'];
 	service_worker: boolean;
 	templates: {
-		app(values: { head: string; body: string; assets: string; nonce: string }): string;
+		app(values: {
+			head: string;
+			body: string;
+			assets: string;
+			nonce: string;
+			env: Record<string, string>;
+		}): string;
 		error(values: { message: string; status: number }): string;
 	};
+	version_hash: string;
 }
 
 export interface SSRErrorPage {
@@ -329,6 +371,7 @@ export interface PageNodeIndexes {
 export type SSREndpoint = Partial<Record<HttpMethod, RequestHandler>> & {
 	prerender?: PrerenderOption;
 	trailingSlash?: TrailingSlash;
+	config?: any;
 };
 
 export interface SSRRoute {

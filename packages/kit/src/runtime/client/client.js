@@ -15,6 +15,7 @@ import {
 	is_external_url,
 	scroll_state
 } from './utils.js';
+import * as storage from './session-storage.js';
 import {
 	lock_fetch,
 	unlock_fetch,
@@ -24,24 +25,14 @@ import {
 } from './fetcher.js';
 import { parse } from './parse.js';
 
-import Root from '__GENERATED__/root.svelte';
-import { nodes, server_loads, dictionary, matchers, hooks } from '__GENERATED__/client-manifest.js';
+import { base } from '__sveltekit/paths';
 import { HttpError, Redirect } from '../control.js';
 import { stores } from './singletons.js';
 import { unwrap_promises } from '../../utils/promises.js';
 import * as devalue from 'devalue';
-import { INDEX_KEY, PRELOAD_PRIORITIES, SCROLL_KEY } from './constants.js';
+import { INDEX_KEY, PRELOAD_PRIORITIES, SCROLL_KEY, SNAPSHOT_KEY } from './constants.js';
 import { validate_common_exports } from '../../utils/exports.js';
-
-const routes = parse(nodes, server_loads, dictionary, matchers);
-
-const default_layout_loader = nodes[0];
-const default_error_loader = nodes[1];
-
-// we import the root layout/error nodes eagerly, so that
-// connectivity errors after initialisation don't nuke the app
-default_layout_loader();
-default_error_loader();
+import { compact } from '../../utils/array.js';
 
 // We track the scroll position associated with each history entry in sessionStorage,
 // rather than on history.state itself, because when navigation is driven by
@@ -50,12 +41,10 @@ default_error_loader();
 
 /** @typedef {{ x: number, y: number }} ScrollPosition */
 /** @type {Record<number, ScrollPosition>} */
-let scroll_positions = {};
-try {
-	scroll_positions = JSON.parse(sessionStorage[SCROLL_KEY]);
-} catch {
-	// do nothing
-}
+const scroll_positions = storage.get(SCROLL_KEY) ?? {};
+
+/** @type {Record<string, any[]>} */
+const snapshots = storage.get(SNAPSHOT_KEY) ?? {};
 
 /** @param {number} index */
 function update_scroll_positions(index) {
@@ -63,16 +52,32 @@ function update_scroll_positions(index) {
 }
 
 /**
- * @param {{
- *   target: HTMLElement;
- *   base: string;
- * }} opts
+ * @param {import('./types').SvelteKitApp} app
+ * @param {HTMLElement} target
  * @returns {import('./types').Client}
  */
-export function create_client({ target, base }) {
+export function create_client(app, target) {
+	const routes = parse(app);
+
+	const default_layout_loader = app.nodes[0];
+	const default_error_loader = app.nodes[1];
+
+	// we import the root layout/error nodes eagerly, so that
+	// connectivity errors after initialisation don't nuke the app
+	default_layout_loader();
+	default_error_loader();
+
 	const container = __SVELTEKIT_EMBEDDED__ ? target : document.documentElement;
 	/** @type {Array<((url: URL) => boolean)>} */
 	const invalidated = [];
+
+	/**
+	 * An array of the `+layout.svelte` and `+page.svelte` component instances
+	 * that currently live on the page — used for capturing and restoring snapshots.
+	 * It's updated/manipulated through `bind:this` in `Root.svelte`.
+	 * @type {import('svelte').SvelteComponent[]}
+	 */
+	const components = [];
 
 	/** @type {{id: string, promise: Promise<import('./types').NavigationResult>} | null} */
 	let load_cache = null;
@@ -107,6 +112,7 @@ export function create_client({ target, base }) {
 	let root;
 
 	// keeping track of the history index in order to prevent popstate navigation events if needed
+	// eslint-disable-next-line compat/compat -- if the browser doesn't support `history.state` then this will be just undefined
 	let current_history_index = history.state?.[INDEX_KEY];
 
 	if (!current_history_index) {
@@ -157,6 +163,20 @@ export function create_client({ target, base }) {
 		await update(intent, url, []);
 	}
 
+	/** @param {number} index */
+	function capture_snapshot(index) {
+		if (components.some((c) => c?.snapshot)) {
+			snapshots[index] = components.map((c) => c?.snapshot?.capture());
+		}
+	}
+
+	/** @param {number} index */
+	function restore_snapshot(index) {
+		snapshots[index]?.forEach((value, i) => {
+			components[i]?.snapshot?.restore(value);
+		});
+	}
+
 	/**
 	 * @param {string | URL} url
 	 * @param {{ noScroll?: boolean; replaceState?: boolean; keepFocus?: boolean; state?: any; invalidateAll?: boolean }} opts
@@ -199,14 +219,8 @@ export function create_client({ target, base }) {
 		});
 	}
 
-	/** @param {URL} url */
-	async function preload_data(url) {
-		const intent = get_navigation_intent(url, false);
-
-		if (!intent) {
-			throw new Error(`Attempted to preload a URL that does not belong to this app: ${url}`);
-		}
-
+	/** @param {import('./types').NavigationIntent} intent */
+	async function preload_data(intent) {
 		load_cache = {
 			id: intent.id,
 			promise: load_route(intent).then((result) => {
@@ -237,11 +251,20 @@ export function create_client({ target, base }) {
 	 * @param {import('./types').NavigationIntent | undefined} intent
 	 * @param {URL} url
 	 * @param {string[]} redirect_chain
+	 * @param {number} [previous_history_index]
 	 * @param {{hash?: string, scroll: { x: number, y: number } | null, keepfocus: boolean, details: { replaceState: boolean, state: any } | null}} [opts]
 	 * @param {{}} [nav_token] To distinguish between different navigation events and determine the latest. Needed for example for redirects to keep the original token
 	 * @param {() => void} [callback]
 	 */
-	async function update(intent, url, redirect_chain, opts, nav_token = {}, callback) {
+	async function update(
+		intent,
+		url,
+		redirect_chain,
+		previous_history_index,
+		opts,
+		nav_token = {},
+		callback
+	) {
 		token = nav_token;
 		let navigation_result = intent && (await load_route(intent));
 
@@ -286,7 +309,7 @@ export function create_client({ target, base }) {
 				);
 				return false;
 			}
-		} else if (/** @type {number} */ (navigation_result.props?.page?.status) >= 400) {
+		} else if (/** @type {number} */ (navigation_result.props.page?.status) >= 400) {
 			const updated = await stores.updated.check();
 			if (updated) {
 				await native_navigation(url);
@@ -300,11 +323,36 @@ export function create_client({ target, base }) {
 
 		updating = true;
 
+		// `previous_history_index` will be undefined for invalidation
+		if (previous_history_index) {
+			update_scroll_positions(previous_history_index);
+			capture_snapshot(previous_history_index);
+		}
+
+		// ensure the url pathname matches the page's trailing slash option
+		if (
+			navigation_result.props.page?.url &&
+			navigation_result.props.page.url.pathname !== url.pathname
+		) {
+			url.pathname = navigation_result.props.page?.url.pathname;
+		}
+
 		if (opts && opts.details) {
 			const { details } = opts;
 			const change = details.replaceState ? 0 : 1;
 			details.state[INDEX_KEY] = current_history_index += change;
 			history[details.replaceState ? 'replaceState' : 'pushState'](details.state, '', url);
+
+			if (!details.replaceState) {
+				// if we navigated back, then pushed a new state, we can
+				// release memory by pruning the scroll/snapshot lookup
+				let i = current_history_index + 1;
+				while (snapshots[i] || scroll_positions[i]) {
+					delete snapshots[i];
+					delete scroll_positions[i];
+					i += 1;
+				}
+			}
 		}
 
 		// reset preload synchronously after the history state has been set to avoid race conditions
@@ -313,6 +361,7 @@ export function create_client({ target, base }) {
 		if (started) {
 			current = navigation_result.state;
 
+			// reset url before updating page store
 			if (navigation_result.props.page) {
 				navigation_result.props.page.url = url;
 			}
@@ -325,15 +374,25 @@ export function create_client({ target, base }) {
 		// opts must be passed if we're navigating
 		if (opts) {
 			const { scroll, keepfocus } = opts;
+			const { activeElement } = document;
 
-			// reset focus first, so that manual focus management can override it
-			if (!keepfocus) reset_focus();
-
-			// need to render the DOM before we can scroll to the rendered elements
+			// need to render the DOM before we can scroll to the rendered elements and do focus management
 			await tick();
 
+			const changed_focus =
+				// reset focus only if any manual focus management didn't override it
+				document.activeElement !== activeElement &&
+				// also refocus when activeElement is body already because the
+				// focus event might not have been fired on it yet
+				document.activeElement !== document.body;
+
+			if (!keepfocus && !changed_focus) {
+				await reset_focus();
+			}
+
 			if (autoscroll) {
-				const deep_linked = url.hash && document.getElementById(url.hash.slice(1));
+				const deep_linked =
+					url.hash && document.getElementById(decodeURIComponent(url.hash.slice(1)));
 				if (scroll) {
 					scrollTo(scroll.x, scroll.y);
 				} else if (deep_linked) {
@@ -371,11 +430,13 @@ export function create_client({ target, base }) {
 
 		page = /** @type {import('types').Page} */ (result.props.page);
 
-		root = new Root({
+		root = new app.root({
 			target,
-			props: { ...result.props, stores },
+			props: { ...result.props, stores, components },
 			hydrate: true
 		});
+
+		restore_snapshot(current_history_index);
 
 		/** @type {import('types').AfterNavigate} */
 		const navigation = {
@@ -414,8 +475,6 @@ export function create_client({ target, base }) {
 		route,
 		form
 	}) {
-		const filtered = /** @type {import('./types').BranchNode[] } */ (branch.filter(Boolean));
-
 		/** @type {import('types').TrailingSlash} */
 		let slash = 'never';
 		for (const node of branch) {
@@ -436,7 +495,7 @@ export function create_client({ target, base }) {
 			},
 			props: {
 				// @ts-ignore Somehow it's getting SvelteComponent and SvelteComponentDev mixed up
-				components: filtered.map((branch_node) => branch_node.node.component)
+				constructors: compact(branch).map((branch_node) => branch_node.node.component)
 			}
 		};
 
@@ -446,21 +505,24 @@ export function create_client({ target, base }) {
 
 		let data = {};
 		let data_changed = !page;
-		for (let i = 0; i < filtered.length; i += 1) {
-			const node = filtered[i];
+
+		let p = 0;
+
+		for (let i = 0; i < Math.max(branch.length, current.branch.length); i += 1) {
+			const node = branch[i];
+			const prev = current.branch[i];
+
+			if (node?.data !== prev?.data) data_changed = true;
+			if (!node) continue;
+
 			data = { ...data, ...node.data };
 
 			// Only set props if the node actually updated. This prevents needless rerenders.
-			if (data_changed || !current.branch.some((previous) => previous === node)) {
-				result.props[`data_${i}`] = data;
-				data_changed = data_changed || Object.keys(node.data ?? {}).length > 0;
+			if (data_changed) {
+				result.props[`data_${p}`] = data;
 			}
-		}
-		if (!data_changed) {
-			// If nothing was added, and the object entries are the same length, this means
-			// that nothing was removed either and therefore the data is the same as the previous one.
-			// This would be more readable with a separate boolean but that would cost us some bytes.
-			data_changed = Object.keys(page.data).length !== Object.keys(data).length;
+
+			p += 1;
 		}
 
 		const page_changed =
@@ -582,12 +644,17 @@ export function create_client({ target, base }) {
 					}
 
 					// we must fixup relative urls so they are resolved from the target page
-					const resolved = new URL(requested, url).href;
-					depends(resolved);
+					const resolved = new URL(requested, url);
+					depends(resolved.href);
+
+					// match ssr serialized data url, which is important to find cached responses
+					if (resolved.origin === url.origin) {
+						requested = resolved.href.slice(url.origin.length);
+					}
 
 					// prerendered pages may be served from any origin, so `initial_fetch` urls shouldn't be resolved
 					return started
-						? subsequent_fetch(requested, resolved, init)
+						? subsequent_fetch(requested, resolved.href, init)
 						: initial_fetch(requested, init);
 				},
 				setHeaders: () => {}, // noop
@@ -667,22 +734,8 @@ export function create_client({ target, base }) {
 	 * @returns {import('./types').DataNode | null}
 	 */
 	function create_data_node(node, previous) {
-		if (node?.type === 'data') {
-			return {
-				type: 'data',
-				data: node.data,
-				uses: {
-					dependencies: new Set(node.uses.dependencies ?? []),
-					params: new Set(node.uses.params ?? []),
-					parent: !!node.uses.parent,
-					route: !!node.uses.route,
-					url: !!node.uses.url
-				},
-				slash: node.slash
-			};
-		} else if (node?.type === 'skip') {
-			return previous ?? null;
-		}
+		if (node?.type === 'data') return node;
+		if (node?.type === 'skip') return previous ?? null;
 		return null;
 	}
 
@@ -705,36 +758,35 @@ export function create_client({ target, base }) {
 		errors.forEach((loader) => loader?.().catch(() => {}));
 		loaders.forEach((loader) => loader?.[1]().catch(() => {}));
 
-		/** @type {import('types').ServerData | null} */
+		/** @type {import('types').ServerNodesResponse | import('types').ServerRedirectNode | null} */
 		let server_data = null;
 
 		const url_changed = current.url ? id !== current.url.pathname + current.url.search : false;
 		const route_changed = current.route ? route.id !== current.route.id : false;
 
-		const invalid_server_nodes = loaders.reduce((acc, loader, i) => {
+		let parent_invalid = false;
+		const invalid_server_nodes = loaders.map((loader, i) => {
 			const previous = current.branch[i];
 
 			const invalid =
 				!!loader?.[0] &&
 				(previous?.loader !== loader[1] ||
-					has_changed(
-						acc.some(Boolean),
-						route_changed,
-						url_changed,
-						previous.server?.uses,
-						params
-					));
+					has_changed(parent_invalid, route_changed, url_changed, previous.server?.uses, params));
 
-			acc.push(invalid);
-			return acc;
-		}, /** @type {boolean[]} */ ([]));
+			if (invalid) {
+				// For the next one
+				parent_invalid = true;
+			}
+
+			return invalid;
+		});
 
 		if (invalid_server_nodes.some(Boolean)) {
 			try {
 				server_data = await load_data(url, invalid_server_nodes);
 			} catch (error) {
 				return load_root_error_page({
-					status: 500,
+					status: error instanceof HttpError ? error.status : 500,
 					error: await handle_error(error, { url, params, route: { id: route.id } }),
 					url,
 					route
@@ -788,7 +840,7 @@ export function create_client({ target, base }) {
 					// server_data_node is undefined if it wasn't reloaded from the server;
 					// and if current loader uses server data, we want to reuse previous data.
 					server_data_node === undefined && loader[0] ? { type: 'skip' } : server_data_node ?? null,
-					previous?.server
+					loader[0] ? previous?.server : undefined
 				)
 			});
 		});
@@ -910,12 +962,12 @@ export function create_client({ target, base }) {
 		/** @type {Record<string, string>} */
 		const params = {}; // error page does not have params
 
-		const node = await default_layout_loader();
-
 		/** @type {import('types').ServerDataNode | null} */
 		let server_data_node = null;
 
-		if (node.has_server_load) {
+		const default_layout_has_server_load = app.server_loads[0] === 0;
+
+		if (default_layout_has_server_load) {
 			// TODO post-https://github.com/sveltejs/kit/discussions/6124 we can use
 			// existing root layout data
 			try {
@@ -973,7 +1025,7 @@ export function create_client({ target, base }) {
 	function get_navigation_intent(url, invalidating) {
 		if (is_external_url(url, base)) return;
 
-		const path = decode_pathname(url.pathname.slice(base.length) || '/');
+		const path = get_url_path(url);
 
 		for (const route of routes) {
 			const params = route.exec(path);
@@ -985,6 +1037,11 @@ export function create_client({ target, base }) {
 				return intent;
 			}
 		}
+	}
+
+	/** @param {URL} url */
+	function get_url_path(url) {
+		return decode_pathname(url.pathname.slice(base.length) || '/');
 	}
 
 	/**
@@ -1070,7 +1127,8 @@ export function create_client({ target, base }) {
 			return;
 		}
 
-		update_scroll_positions(current_history_index);
+		// store this before calling `accepted()`, which may change the index
+		const previous_history_index = current_history_index;
 
 		accepted();
 
@@ -1084,6 +1142,7 @@ export function create_client({ target, base }) {
 			intent,
 			url,
 			redirect_chain,
+			previous_history_index,
 			{
 				scroll,
 				keepfocus,
@@ -1164,7 +1223,9 @@ export function create_client({ target, base }) {
 			(entries) => {
 				for (const entry of entries) {
 					if (entry.isIntersecting) {
-						preload_code(new URL(/** @type {HTMLAnchorElement} */ (entry.target).href).pathname);
+						preload_code(
+							get_url_path(new URL(/** @type {HTMLAnchorElement} */ (entry.target).href))
+						);
 						observer.unobserve(entry.target);
 					}
 				}
@@ -1187,9 +1248,25 @@ export function create_client({ target, base }) {
 
 			if (!options.reload) {
 				if (priority <= options.preload_data) {
-					preload_data(/** @type {URL} */ (url));
+					const intent = get_navigation_intent(/** @type {URL} */ (url), false);
+					if (intent) {
+						if (__SVELTEKIT_DEV__) {
+							preload_data(intent).then((result) => {
+								if (result.type === 'loaded' && result.state.error) {
+									console.warn(
+										`Preloading data for ${intent.url.pathname} failed with the following error: ${result.state.error.message}\n` +
+											'If this error is transient, you can ignore it. Otherwise, consider disabling preloading for this route. ' +
+											'This route was preloaded due to a data-sveltekit-preload-data attribute. ' +
+											'See https://kit.svelte.dev/docs/link-options for more info'
+									);
+								}
+							});
+						} else {
+							preload_data(intent);
+						}
+					}
 				} else if (priority <= options.preload_code) {
-					preload_code(/** @type {URL} */ (url).pathname);
+					preload_code(get_url_path(/** @type {URL} */ (url)));
 				}
 			}
 		}
@@ -1209,13 +1286,28 @@ export function create_client({ target, base }) {
 				}
 
 				if (options.preload_code === PRELOAD_PRIORITIES.eager) {
-					preload_code(/** @type {URL} */ (url).pathname);
+					preload_code(get_url_path(/** @type {URL} */ (url)));
 				}
 			}
 		}
 
 		callbacks.after_navigate.push(after_navigate);
 		after_navigate();
+	}
+
+	/**
+	 * @param {unknown} error
+	 * @param {import('types').NavigationEvent} event
+	 * @returns {import('types').MaybePromise<App.Error>}
+	 */
+	function handle_error(error, event) {
+		if (error instanceof HttpError) {
+			return error.body;
+		}
+		return (
+			app.hooks.handleError({ error, event }) ??
+			/** @type {any} */ ({ message: event.route.id != null ? 'Internal Error' : 'Not Found' })
+		);
 	}
 
 	return {
@@ -1273,7 +1365,13 @@ export function create_client({ target, base }) {
 
 		preload_data: async (href) => {
 			const url = new URL(href, get_base_uri(document));
-			await preload_data(url);
+			const intent = get_navigation_intent(url, false);
+
+			if (!intent) {
+				throw new Error(`Attempted to preload a URL that does not belong to this app: ${url}`);
+			}
+
+			await preload_data(intent);
 		},
 
 		preload_code,
@@ -1323,7 +1421,10 @@ export function create_client({ target, base }) {
 		},
 
 		_start_router: () => {
-			history.scrollRestoration = 'manual';
+			// If the browser supports `history.scrollRestoration`
+			if (history.scrollRestoration) {
+				history.scrollRestoration = 'manual';
+			}
 
 			// Adopted from Nuxt.js
 			// Reset scrollRestoration to auto when leaving page, allowing page reload
@@ -1362,12 +1463,10 @@ export function create_client({ target, base }) {
 			addEventListener('visibilitychange', () => {
 				if (document.visibilityState === 'hidden') {
 					update_scroll_positions(current_history_index);
+					storage.set(SCROLL_KEY, scroll_positions);
 
-					try {
-						sessionStorage[SCROLL_KEY] = JSON.stringify(scroll_positions);
-					} catch {
-						// do nothing
-					}
+					capture_snapshot(current_history_index);
+					storage.set(SNAPSHOT_KEY, snapshots);
 				}
 			});
 
@@ -1387,10 +1486,17 @@ export function create_client({ target, base }) {
 				const a = find_anchor(/** @type {Element} */ (event.composedPath()[0]), container);
 				if (!a) return;
 
-				const { url, external, has } = get_link_info(a, base);
-				const options = get_router_options(a);
+				const { url, external, target } = get_link_info(a, base);
 				if (!url) return;
 
+				// bail out before `beforeNavigate` if link opens in a different tab
+				if (target === '_parent' || target === '_top') {
+					if (window.parent !== window) return;
+				} else if (target && target !== '_self') {
+					return;
+				}
+
+				const options = get_router_options(a);
 				const is_svg_a_element = a instanceof SVGAElement;
 
 				// Ignore URL protocols that differ to the current one and are not http(s) (e.g. `mailto:`, `tel:`, `myapp:`, etc.)
@@ -1407,8 +1513,6 @@ export function create_client({ target, base }) {
 					!(url.protocol === 'https:' || url.protocol === 'http:')
 				)
 					return;
-
-				if (has.download) return;
 
 				// Ignore the following but fire beforeNavigate
 				if (external || options.reload) {
@@ -1509,17 +1613,29 @@ export function create_client({ target, base }) {
 				});
 			});
 
-			addEventListener('popstate', (event) => {
+			addEventListener('popstate', async (event) => {
 				if (event.state?.[INDEX_KEY]) {
 					// if a popstate-driven navigation is cancelled, we need to counteract it
 					// with history.go, which means we end up back here, hence this check
 					if (event.state[INDEX_KEY] === current_history_index) return;
 
-					const delta = event.state[INDEX_KEY] - current_history_index;
+					const scroll = scroll_positions[event.state[INDEX_KEY]];
 
-					navigate({
+					// if the only change is the hash, we don't need to do anything...
+					if (current.url.href.split('#')[0] === location.href.split('#')[0]) {
+						// ...except handle scroll
+						scroll_positions[current_history_index] = scroll_state();
+						current_history_index = event.state[INDEX_KEY];
+						scrollTo(scroll.x, scroll.y);
+						return;
+					}
+
+					const delta = event.state[INDEX_KEY] - current_history_index;
+					let blocked = false;
+
+					await navigate({
 						url: new URL(location.href),
-						scroll: scroll_positions[event.state[INDEX_KEY]],
+						scroll,
 						keepfocus: false,
 						redirect_chain: [],
 						details: null,
@@ -1528,10 +1644,15 @@ export function create_client({ target, base }) {
 						},
 						blocked: () => {
 							history.go(-delta);
+							blocked = true;
 						},
 						type: 'popstate',
 						delta
 					});
+
+					if (!blocked) {
+						restore_snapshot(current_history_index);
+					}
 				}
 			});
 
@@ -1591,9 +1712,13 @@ export function create_client({ target, base }) {
 			try {
 				const branch_promises = node_ids.map(async (n, i) => {
 					const server_data_node = server_data_nodes[i];
+					// Type isn't completely accurate, we still need to deserialize uses
+					if (server_data_node?.uses) {
+						server_data_node.uses = deserialize_uses(server_data_node.uses);
+					}
 
 					return load_node({
-						loader: nodes[n],
+						loader: app.nodes[n],
 						url,
 						params,
 						route,
@@ -1641,7 +1766,7 @@ export function create_client({ target, base }) {
 /**
  * @param {URL} url
  * @param {boolean[]} invalid
- * @returns {Promise<import('types').ServerData>}
+ * @returns {Promise<import('types').ServerNodesResponse |import('types').ServerRedirectNode>}
  */
 async function load_data(url, invalid) {
 	const data_url = new URL(url);
@@ -1655,43 +1780,143 @@ async function load_data(url, invalid) {
 	);
 
 	const res = await native_fetch(data_url.href);
-	const data = await res.json();
 
 	if (!res.ok) {
 		// error message is a JSON-stringified string which devalue can't handle at the top level
-		throw new Error(data);
+		// turn it into a HttpError to not call handleError on the client again (was already handled on the server)
+		throw new HttpError(res.status, await res.json());
 	}
 
-	// revive devalue-flattened data
-	data.nodes?.forEach((/** @type {any} */ node) => {
-		if (node?.type === 'data') {
-			node.data = devalue.unflatten(node.data);
-			node.uses = {
-				dependencies: new Set(node.uses.dependencies ?? []),
-				params: new Set(node.uses.params ?? []),
-				parent: !!node.uses.parent,
-				route: !!node.uses.route,
-				url: !!node.uses.url
+	return new Promise(async (resolve) => {
+		/**
+		 * Kinda support somehow legacy environments that don't support the Stream API.
+		 * @param {Response} response
+		 */
+		const sloppy_legacy_friendly_reader_decoder = (response) => {
+			if ('body' in response && typeof TextDecoder !== 'undefined') {
+				return {
+					reader: /** @type {ReadableStream<Uint8Array>} */ (res.body).getReader(),
+					decoder: /** @type {{decode: (value: BufferSource | string | undefined) => string}} */ (
+						new TextDecoder()
+					)
+				};
+			}
+			// otherwise, we're in a legacy environment that doesn't support `Response.body`, so we shall simulate it
+
+			/** @type {string[] | undefined} */
+			let text_lines = undefined;
+			let current_line = 0;
+
+			return {
+				reader: {
+					read: async () => {
+						if (text_lines === undefined) {
+							const text = await res.text();
+
+							// Split the string on \n or \r characters
+							text_lines = text.split(/\r?\n|\r|\n/g);
+						}
+
+						if (current_line >= text_lines.length) {
+							return { done: true, value: undefined };
+						} else {
+							return { done: false, value: text_lines[current_line++] };
+						}
+					}
+				},
+				decoder: {
+					/**
+					 *
+					 * @param {BufferSource | string | undefined} value
+					 */
+					decode: (value) => /** @type {string} */ (value)
+				}
 			};
+		};
+
+		/**
+		 * Map of deferred promises that will be resolved by a subsequent chunk of data
+		 * @type {Map<string, import('types').Deferred>}
+		 */
+		const deferreds = new Map();
+		const { reader, decoder } = sloppy_legacy_friendly_reader_decoder(res);
+
+		/**
+		 * @param {any} data
+		 */
+		function deserialize(data) {
+			return devalue.unflatten(data, {
+				Promise: (id) => {
+					return new Promise((fulfil, reject) => {
+						deferreds.set(id, { fulfil, reject });
+					});
+				}
+			});
+		}
+
+		let text = '';
+
+		while (true) {
+			// Format follows ndjson (each line is a JSON object) or regular JSON spec
+			const { done, value } = await reader.read();
+			if (done && !text) break;
+
+			text += !value && text ? '\n' : decoder.decode(value); // no value -> final chunk -> add a new line to trigger the last parse
+
+			while (true) {
+				const split = text.indexOf('\n');
+				if (split === -1) {
+					break;
+				}
+
+				const node = JSON.parse(text.slice(0, split));
+				text = text.slice(split + 1);
+
+				if (node.type === 'redirect') {
+					return resolve(node);
+				}
+
+				if (node.type === 'data') {
+					// This is the first (and possibly only, if no pending promises) chunk
+					node.nodes?.forEach((/** @type {any} */ node) => {
+						if (node?.type === 'data') {
+							node.uses = deserialize_uses(node.uses);
+							node.data = deserialize(node.data);
+						}
+					});
+
+					resolve(node);
+				} else if (node.type === 'chunk') {
+					// This is a subsequent chunk containing deferred data
+					const { id, data, error } = node;
+					const deferred = /** @type {import('types').Deferred} */ (deferreds.get(id));
+					deferreds.delete(id);
+
+					if (error) {
+						deferred.reject(deserialize(error));
+					} else {
+						deferred.fulfil(deserialize(data));
+					}
+				}
+			}
 		}
 	});
 
-	return data;
+	// TODO edge case handling necessary? stream() read fails?
 }
 
 /**
- * @param {unknown} error
- * @param {import('types').NavigationEvent} event
- * @returns {import('../../../types/private.js').MaybePromise<App.Error>}
+ * @param {any} uses
+ * @return {import('types').Uses}
  */
-function handle_error(error, event) {
-	if (error instanceof HttpError) {
-		return error.body;
-	}
-	return (
-		hooks.handleError({ error, event }) ??
-		/** @type {any} */ ({ message: event.route.id != null ? 'Internal Error' : 'Not Found' })
-	);
+function deserialize_uses(uses) {
+	return {
+		dependencies: new Set(uses?.dependencies ?? []),
+		params: new Set(uses?.params ?? []),
+		parent: !!uses?.parent,
+		route: !!uses?.route,
+		url: !!uses?.url
+	};
 }
 
 function reset_focus() {
@@ -1711,16 +1936,19 @@ function reset_focus() {
 		root.tabIndex = -1;
 		root.focus({ preventScroll: true });
 
-		setTimeout(() => {
-			getSelection()?.removeAllRanges();
-		});
-
 		// restore `tabindex` as to prevent `root` from stealing input from elements
 		if (tabindex !== null) {
 			root.setAttribute('tabindex', tabindex);
 		} else {
 			root.removeAttribute('tabindex');
 		}
+
+		return new Promise((resolve) => {
+			setTimeout(() => {
+				// fixes https://github.com/sveltejs/kit/issues/8439
+				resolve(getSelection()?.removeAllRanges());
+			});
+		});
 	}
 }
 
@@ -1730,7 +1958,7 @@ if (DEV) {
 	console.warn = function warn(...args) {
 		if (
 			args.length === 1 &&
-			/<(Layout|Page)(_[\w$]+)?> was created (with unknown|without expected) prop '(data|form)'/.test(
+			/<(Layout|Page|Error)(_[\w$]+)?> was created (with unknown|without expected) prop '(data|form)'/.test(
 				args[0]
 			)
 		) {

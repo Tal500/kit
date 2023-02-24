@@ -1,14 +1,9 @@
+import { text } from '../../../exports/index.js';
 import { compact } from '../../../utils/array.js';
 import { normalize_error } from '../../../utils/error.js';
 import { add_data_suffix } from '../../../utils/url.js';
 import { HttpError, Redirect } from '../../control.js';
-import {
-	get_option,
-	redirect_response,
-	static_error_page,
-	handle_error_and_jsonify,
-	serialize_data_node
-} from '../utils.js';
+import { redirect_response, static_error_page, handle_error_and_jsonify } from '../utils.js';
 import {
 	handle_action_json_request,
 	handle_action_request,
@@ -18,6 +13,8 @@ import {
 import { load_data, load_server_data } from './load_data.js';
 import { render_response } from './render.js';
 import { respond_with_error } from './respond_with_error.js';
+import { get_option } from '../../../utils/options.js';
+import { get_data_json } from '../data/index.js';
 
 /**
  * @param {import('types').RequestEvent} event
@@ -32,7 +29,7 @@ import { respond_with_error } from './respond_with_error.js';
 export async function render_page(event, route, page, options, manifest, state, resolve_opts) {
 	if (state.initiator === route) {
 		// infinite request cycle detected
-		return new Response(`Not found: ${event.url.pathname}`, {
+		return text(`Not found: ${event.url.pathname}`, {
 			status: 404
 		});
 	}
@@ -58,7 +55,7 @@ export async function render_page(event, route, page, options, manifest, state, 
 		/** @type {import('types').ActionResult | undefined} */
 		let action_result = undefined;
 
-		if (is_action_request(event, leaf_node)) {
+		if (is_action_request(event)) {
 			// for action requests, first call handler in +page.server.js
 			// (this also determines status code)
 			action_result = await handle_action_request(event, leaf_node.server);
@@ -84,7 +81,7 @@ export async function render_page(event, route, page, options, manifest, state, 
 
 		if (should_prerender) {
 			const mod = leaf_node.server;
-			if (mod && mod.actions) {
+			if (mod?.actions) {
 				throw new Error('Cannot prerender pages with actions');
 			}
 		} else if (state.prerendering) {
@@ -239,7 +236,7 @@ export async function render_page(event, route, page, options, manifest, state, 
 							});
 
 							state.prerendering.dependencies.set(data_pathname, {
-								response: new Response(body),
+								response: text(body),
 								body
 							});
 						}
@@ -289,13 +286,22 @@ export async function render_page(event, route, page, options, manifest, state, 
 		}
 
 		if (state.prerendering && should_prerender_data) {
-			const body = `{"type":"data","nodes":[${branch
-				.map((node) => serialize_data_node(node?.server_data))
-				.join(',')}]}`;
+			// ndjson format
+			let { data, chunks } = get_data_json(
+				event,
+				options,
+				branch.map((node) => node?.server_data)
+			);
+
+			if (chunks) {
+				for await (const chunk of chunks) {
+					data += chunk;
+				}
+			}
 
 			state.prerendering.dependencies.set(data_pathname, {
-				response: new Response(body),
-				body
+				response: text(data),
+				body: data
 			});
 		}
 

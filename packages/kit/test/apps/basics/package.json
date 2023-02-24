@@ -9,7 +9,9 @@
 		"check": "svelte-kit sync && tsc && svelte-check",
 		"test": "node test/setup.js && pnpm test:dev && pnpm test:build",
 		"test:dev": "rimraf test/errors.json && cross-env DEV=true playwright test",
-		"test:build": "rimraf test/errors.json && playwright test"
+		"test:build": "rimraf test/errors.json && playwright test",
+		"test:cross-platform:dev": "node test/setup.js && rimraf test/errors.json && cross-env DEV=true playwright test test/cross-platform/",
+		"test:cross-platform:build": "node test/setup.js && rimraf test/errors.json && playwright test test/cross-platform/"
 	},
 	"devDependencies": {
 		"@sveltejs/kit": "workspace:^",
@@ -18,7 +20,7 @@
 		"svelte": "^3.55.1",
 		"svelte-check": "^3.0.2",
 		"typescript": "^4.9.4",
-		"vite": "^4.0.4"
+		"vite": "^4.1.1"
 	},
 	"type": "module"
 }

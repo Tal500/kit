@@ -2,7 +2,7 @@
 title: Loading data
 ---
 
-Before a [`+page.svelte`](/docs/routing#page-page-svelte) component (and its containing [`+layout.svelte`](/docs/routing#layout-layout-svelte) components) can be rendered, we often need to get some data. This is done by defining `load` functions.
+Before a [`+page.svelte`](routing#page-page-svelte) component (and its containing [`+layout.svelte`](routing#layout-layout-svelte) components) can be rendered, we often need to get some data. This is done by defining `load` functions.
 
 ## Page data
 
@@ -57,7 +57,7 @@ export async function load({ params }) {
 }
 ```
 
-Notice that the type changed from `PageLoad` to `PageServerLoad`, because server `load` functions can access additional arguments. To understand when to use `+page.js` and when to use `+page.server.js`, see [Universal vs server](/docs/load#universal-vs-server).
+Notice that the type changed from `PageLoad` to `PageServerLoad`, because server `load` functions can access additional arguments. To understand when to use `+page.js` and when to use `+page.server.js`, see [Universal vs server](load#universal-vs-server).
 
 ## Layout data
 
@@ -164,7 +164,7 @@ Conceptually, they're the same thing, but there are some important differences t
 
 ### Input
 
-Both universal and server `load` functions have access to properties describing the request (`params`, `route` and `url`) and various functions (`depends`, `fetch` and `parent`). These are described in the following sections.
+Both universal and server `load` functions have access to properties describing the request (`params`, `route` and `url`) and various functions (`fetch`, `setHeaders`, `parent` and `depends`). These are described in the following sections.
 
 Server `load` functions are called with a `ServerLoadEvent`, which inherits `clientAddress`, `cookies`, `locals`, `platform` and `request` from `RequestEvent`.
 
@@ -174,7 +174,7 @@ Universal `load` functions are called with a `LoadEvent`, which has a `data` pro
 
 A universal `load` function can return an object containing any values, including things like custom classes and component constructors.
 
-A server `load` function must return data that can be serialized with [devalue](https://github.com/rich-harris/devalue) — anything that can be represented as JSON plus things like `BigInt`, `Date`, `Map`, `Set` and `RegExp`, or repeated/cyclical references — so that it can be transported over the network.
+A server `load` function must return data that can be serialized with [devalue](https://github.com/rich-harris/devalue) — anything that can be represented as JSON plus things like `BigInt`, `Date`, `Map`, `Set` and `RegExp`, or repeated/cyclical references — so that it can be transported over the network. Your data can include [promises](#streaming-with-promises), in which case it will be streamed to browsers.
 
 ### When to use which
 
@@ -192,7 +192,7 @@ Often the `load` function depends on the URL in one way or another. For this, th
 
 An instance of [`URL`](https://developer.mozilla.org/en-US/docs/Web/API/URL), containing properties like the `origin`, `hostname`, `pathname` and `searchParams` (which contains the parsed query string as a [`URLSearchParams`](https://developer.mozilla.org/en-US/docs/Web/API/URLSearchParams) object). `url.hash` cannot be accessed during `load`, since it is unavailable on the server.
 
-> In some environments this is derived from request headers during server-side rendering. If you're using [adapter-node](/docs/adapters#supported-environments-node-js), for example, you may need to configure the adapter in order for the URL to be correct.
+> In some environments this is derived from request headers during server-side rendering. If you're using [adapter-node](adapter-node), for example, you may need to configure the adapter in order for the URL to be correct.
 
 ### route
 
@@ -226,7 +226,7 @@ To get data from an external API or a `+server.js` handler, you can use the prov
 - it can be used to make credentialed requests on the server, as it inherits the `cookie` and `authorization` headers for the page request
 - it can make relative requests on the server (ordinarily, `fetch` requires a URL with an origin when used in a server context)
 - internal requests (e.g. for `+server.js` routes) go direct to the handler function when running on the server, without the overhead of an HTTP call
-- during server-side rendering, the response will be captured and inlined into the rendered HTML. Note that headers will _not_ be serialized, unless explicitly included via [`filterSerializedResponseHeaders`](/docs/hooks#server-hooks-handle). Then, during hydration, the response will be read from the HTML, guaranteeing consistency and preventing an additional network request - if you got a warning in your browser console when using the browser `fetch` instead of the `load` `fetch`, this is why.
+- during server-side rendering, the response will be captured and inlined into the rendered HTML. Note that headers will _not_ be serialized, unless explicitly included via [`filterSerializedResponseHeaders`](hooks#server-hooks-handle). Then, during hydration, the response will be read from the HTML, guaranteeing consistency and preventing an additional network request - if you got a warning in your browser console when using the browser `fetch` instead of the `load` `fetch`, this is why.
 
 ```js
 /// file: src/routes/items/[id]/+page.js
@@ -243,7 +243,7 @@ export async function load({ fetch, params }) {
 
 ## Cookies and headers
 
-A server `load` function can get and set [`cookies`](/docs/types#public-types-cookies).
+A server `load` function can get and set [`cookies`](types#public-types-cookies).
 
 ```js
 /// file: src/routes/+layout.server.js
@@ -322,6 +322,7 @@ export async function load({ parent }) {
 ```
 
 ```svelte
+/// file: src/routes/abc/+page.svelte
 <script>
 	/** @type {import('./$types').PageData} */
 	export let data;
@@ -356,7 +357,7 @@ export async function load({ params, parent }) {
 
 ## Errors
 
-If an error is thrown during `load`, the nearest [`+error.svelte`](/docs/routing#error) will be rendered. For _expected_ errors, use the `error` helper from `@sveltejs/kit` to specify the HTTP status code and an optional message:
+If an error is thrown during `load`, the nearest [`+error.svelte`](routing#error) will be rendered. For _expected_ errors, use the `error` helper from `@sveltejs/kit` to specify the HTTP status code and an optional message:
 
 ```js
 /// file: src/routes/admin/+layout.server.js
@@ -386,7 +387,7 @@ export function load({ locals }) {
 }
 ```
 
-If an _unexpected_ error is thrown, SvelteKit will invoke [`handleError`](/docs/hooks#shared-hooks-handleerror) and treat it as a 500 Internal Error.
+If an _unexpected_ error is thrown, SvelteKit will invoke [`handleError`](hooks#shared-hooks-handleerror) and treat it as a 500 Internal Error.
 
 ## Redirects
 
@@ -415,34 +416,62 @@ export function load({ locals }) {
 }
 ```
 
-## Promise unwrapping
+> Make sure you're not catching the thrown redirect, which would prevent SvelteKit from handling it.
 
-Top-level promises will be awaited, which makes it easy to return multiple promises without creating a waterfall:
+In the browser, you can also navigate programmatically outside of a `load` function using [`goto`](modules#$app-navigation-goto) from [`$app.navigation`](modules#$app-navigation).
+
+## Streaming with promises
+
+Promises at the _top level_ of the returned object will be awaited, making it easy to return multiple promises without creating a waterfall. When using a server `load`, _nested_ promises will be streamed to the browser as they resolve. This is useful if you have slow, non-essential data, since you can start rendering the page before all the data is available:
 
 ```js
-/// file: src/routes/+page.js
-/** @type {import('./$types').PageLoad} */
+/// file: src/routes/+page.server.js
+/** @type {import('./$types').PageServerLoad} */
 export function load() {
 	return {
-		a: Promise.resolve('a'),
-		b: Promise.resolve('b'),
-		c: {
-			value: Promise.resolve('c')
+		one: Promise.resolve(1),
+		two: Promise.resolve(2),
+		streamed: {
+			three: new Promise((fulfil) => {
+				setTimeout(() => {
+					fulfil(3)
+				}, 1000);
+			})
 		}
 	};
 }
 ```
 
+This is useful for creating skeleton loading states, for example:
+
 ```svelte
+/// file: src/routes/+page.svelte
 <script>
 	/** @type {import('./$types').PageData} */
 	export let data;
-
-	console.log(data.a); // 'a'
-	console.log(data.b); // 'b'
-	console.log(data.c.value); // `Promise {...}`
 </script>
+
+<p>
+	one: {data.one}
+</p>
+<p>
+	two: {data.two}
+</p>
+<p>
+	three:
+	{#await data.streamed.three}
+		Loading...
+	{:then value}
+		{value}
+	{:catch error}
+		{error.message}
+	{/await}
+</p>
 ```
+
+On platforms that do not support streaming, such as AWS Lambda, responses will be buffered. This means the page will only render once all promises resolve.
+
+> Streaming data will only work when JavaScript is enabled. You should avoid returning nested promises from a universal `load` function if the page is server rendered, as these are _not_ streamed — instead, the promise is recreated when the function re-runs in the browser.
 
 ## Parallel loading
 
@@ -496,9 +525,11 @@ export async function load() {
 
 A `load` function that calls `await parent()` will also re-run if a parent `load` function is re-run.
 
+Dependency tracking does not apply _after_ the `load` function has returned — for example, accessing `params.x` inside a nested [promise](#streaming-with-promises) will not cause the function to re-run when `params.x` changes. (Don't worry, you'll get a warning in development if you accidentally do this.) Instead, access the parameter in the main body of your `load` function.
+
 ### Manual invalidation
 
-You can also re-run `load` functions that apply to the current page using [`invalidate(url)`](/docs/modules#$app-navigation-invalidate), which re-runs all `load` functions that depend on `url`, and [`invalidateAll()`](/docs/modules#$app-navigation-invalidateall), which re-runs every `load` function.
+You can also re-run `load` functions that apply to the current page using [`invalidate(url)`](modules#$app-navigation-invalidate), which re-runs all `load` functions that depend on `url`, and [`invalidateAll()`](modules#$app-navigation-invalidateall), which re-runs every `load` function.
 
 A `load` function depends on `url` if it calls `fetch(url)` or `depends(url)`. Note that `url` can be a custom identifier that starts with `[a-z]:`:
 
@@ -544,10 +575,10 @@ To summarize, a `load` function will re-run in the following situations:
 - It references a property of `params` whose value has changed
 - It references a property of `url` (such as `url.pathname` or `url.search`) whose value has changed
 - It calls `await parent()` and a parent `load` function re-ran
-- It declared a dependency on a specific URL via [`fetch`](#making-fetch-requests) or [`depends`](/docs/types#public-types-loadevent), and that URL was marked invalid with [`invalidate(url)`](/docs/modules#$app-navigation-invalidate)
-- All active `load` functions were forcibly re-run with [`invalidateAll()`](/docs/modules#$app-navigation-invalidateall)
+- It declared a dependency on a specific URL via [`fetch`](#making-fetch-requests) or [`depends`](types#public-types-loadevent), and that URL was marked invalid with [`invalidate(url)`](modules#$app-navigation-invalidate)
+- All active `load` functions were forcibly re-run with [`invalidateAll()`](modules#$app-navigation-invalidateall)
 
-Note that re-running a `load` function will update the `data` prop inside the corresponding `+layout.svelte` or `+page.svelte`; it does _not_ cause the component to be recreated. As a result, internal state is preserved. If this isn't what you want, you can reset whatever you need to reset inside an [`afterNavigate`](/docs/modules#$app-navigation-afternavigate) callback, and/or wrap your component in a [`{#key ...}`](https://svelte.dev/docs#template-syntax-key) block.
+Note that re-running a `load` function will update the `data` prop inside the corresponding `+layout.svelte` or `+page.svelte`; it does _not_ cause the component to be recreated. As a result, internal state is preserved. If this isn't what you want, you can reset whatever you need to reset inside an [`afterNavigate`](modules#$app-navigation-afternavigate) callback, and/or wrap your component in a [`{#key ...}`](https://svelte.dev/docs#template-syntax-key) block.
 
 ## Shared state
 

@@ -11,8 +11,11 @@
  * 	}
  * }
  *
- * export default undefined;
+ * export {};
  * ```
+ *
+ * The `export {}` line exists because without it, the file would be treated as an _ambient module_ which prevents you from adding `import` declarations.
+ * If you need to add ambient `declare module` declarations, do so in a separate file like `src/ambient.d.ts`.
  *
  * By populating these interfaces, you will gain type safety when using `event.locals`, `event.platform`, and `data` from `load` functions.
  */
@@ -37,7 +40,7 @@ declare namespace App {
 	export interface PageData {}
 
 	/**
-	 * If your adapter provides [platform-specific context](https://kit.svelte.dev/docs/adapters#supported-environments-platform-specific-context) via `event.platform`, you can specify it here.
+	 * If your adapter provides [platform-specific context](https://kit.svelte.dev/docs/adapters#platform-specific-context) via `event.platform`, you can specify it here.
 	 */
 	export interface Platform {}
 }
@@ -167,6 +170,7 @@ declare module '$app/navigation' {
 	export function disableScrollHandling(): void;
 	/**
 	 * Returns a Promise that resolves when SvelteKit navigates (or fails to navigate, in which case the promise rejects) to the specified `url`.
+	 * For external URLs, use `window.location = url` instead of calling `goto(url)`.
 	 *
 	 * @param url Where to navigate to. Note that if you've set [`config.kit.paths.base`](https://kit.svelte.dev/docs/configuration#paths) and the URL is root-relative, you need to prepend the base path if you want to navigate within the app.
 	 * @param opts Options related to the navigation
@@ -234,7 +238,7 @@ declare module '$app/navigation' {
 	 * Programmatically imports the code for routes that haven't yet been fetched.
 	 * Typically, you might call this to speed up subsequent navigation.
 	 *
-	 * You can specify routes by any matching pathname such as `/about` (to match `src/routes/about.svelte`) or `/blog/*` (to match `src/routes/blog/[slug].svelte`).
+	 * You can specify routes by any matching pathname such as `/about` (to match `src/routes/about/+page.svelte`) or `/blog/*` (to match `src/routes/blog/[slug]/+page.svelte`).
 	 *
 	 * Unlike `preloadData`, this won't call `load` functions.
 	 * Returns a Promise that resolves when the modules have been imported.
@@ -243,7 +247,8 @@ declare module '$app/navigation' {
 
 	/**
 	 * A navigation interceptor that triggers before we navigate to a new URL, whether by clicking a link, calling `goto(...)`, or using the browser back/forward controls.
-	 * Calling `cancel()` will prevent the navigation from completing.
+	 * Calling `cancel()` will prevent the navigation from completing. If the navigation would have directly unloaded the current page, calling `cancel` will trigger the native
+	 * browser unload confirmation dialog. In these cases, `navigation.willUnload` is `true`.
 	 *
 	 * When a navigation isn't client side, `navigation.to.route.id` will be `null`.
 	 *
@@ -287,16 +292,22 @@ declare module '$app/stores' {
 
 	/**
 	 * A readable store whose value contains page data.
+	 *
+	 * On the server, this store can only be subscribed to during component initialization. In the browser, it can be subscribed to at any time.
 	 */
 	export const page: Readable<Page>;
 	/**
 	 * A readable store.
 	 * When navigating starts, its value is a `Navigation` object with `from`, `to`, `type` and (if `type === 'popstate'`) `delta` properties.
 	 * When navigating finishes, its value reverts to `null`.
+	 *
+	 * On the server, this store can only be subscribed to during component initialization. In the browser, it can be subscribed to at any time.
 	 */
 	export const navigating: Readable<Navigation | null>;
 	/**
-	 *  A readable store whose initial value is `false`. If [`version.pollInterval`](https://kit.svelte.dev/docs/configuration#version) is a non-zero value, SvelteKit will poll for new versions of the app and update the store value to `true` when it detects one. `updated.check()` will force an immediate check, regardless of polling.
+	 * A readable store whose initial value is `false`. If [`version.pollInterval`](https://kit.svelte.dev/docs/configuration#version) is a non-zero value, SvelteKit will poll for new versions of the app and update the store value to `true` when it detects one. `updated.check()` will force an immediate check, regardless of polling.
+	 *
+	 * On the server, this store can only be subscribed to during component initialization. In the browser, it can be subscribed to at any time.
 	 */
 	export const updated: Readable<boolean> & { check(): Promise<boolean> };
 

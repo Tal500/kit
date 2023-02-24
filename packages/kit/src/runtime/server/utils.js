@@ -1,9 +1,8 @@
-import * as devalue from 'devalue';
+import { json, text } from '../../exports/index.js';
 import { coalesce_to_error } from '../../utils/error.js';
 import { negotiate } from '../../utils/http.js';
-import { has_data_suffix } from '../../utils/url.js';
 import { HttpError } from '../control.js';
-import { fix_stack_trace } from '../shared.js';
+import { fix_stack_trace } from '../shared-server.js';
 
 /** @param {any} body */
 export function is_pojo(body) {
@@ -27,7 +26,7 @@ export const GENERIC_ERROR = {
  * @param {import('types').HttpMethod} method
  */
 export function method_not_allowed(mod, method) {
-	return new Response(`${method} method not allowed`, {
+	return text(`${method} method not allowed`, {
 		status: 405,
 		headers: {
 			// https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/405
@@ -41,30 +40,13 @@ export function method_not_allowed(mod, method) {
 export function allowed_methods(mod) {
 	const allowed = [];
 
-	for (const method in ['GET', 'POST', 'PUT', 'PATCH', 'DELETE']) {
+	for (const method in ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']) {
 		if (method in mod) allowed.push(method);
 	}
 
 	if (mod.GET || mod.HEAD) allowed.push('HEAD');
 
 	return allowed;
-}
-
-/**
- * @template {'prerender' | 'ssr' | 'csr' | 'trailingSlash'} Option
- * @template {Option extends 'prerender' ? import('types').PrerenderOption : Option extends 'trailingSlash' ? import('types').TrailingSlash : boolean} Value
- *
- * @param {Array<import('types').SSRNode | undefined>} nodes
- * @param {Option} option
- *
- * @returns {Value | undefined}
- */
-export function get_option(nodes, option) {
-	return nodes.reduce((value, node) => {
-		return /** @type {any} TypeScript's too dumb to understand this */ (
-			node?.universal?.[option] ?? node?.server?.[option] ?? value
-		);
-	}, /** @type {Value | undefined} */ (undefined));
 }
 
 /**
@@ -75,7 +57,7 @@ export function get_option(nodes, option) {
  * @param {string} message
  */
 export function static_error_page(options, status, message) {
-	return new Response(options.templates.error({ status, message }), {
+	return text(options.templates.error({ status, message }), {
 		headers: { 'content-type': 'text/html; charset=utf-8' },
 		status
 	});
@@ -97,10 +79,9 @@ export async function handle_fatal_error(event, options, error) {
 		'text/html'
 	]);
 
-	if (has_data_suffix(new URL(event.request.url).pathname) || type === 'application/json') {
-		return new Response(JSON.stringify(body), {
-			status,
-			headers: { 'content-type': 'application/json; charset=utf-8' }
+	if (event.isDataRequest || type === 'application/json') {
+		return json(body, {
+			status
 		});
 	}
 
@@ -117,7 +98,7 @@ export async function handle_error_and_jsonify(event, options, error) {
 	if (error instanceof HttpError) {
 		return error.body;
 	} else {
-		if (__SVELTEKIT_DEV__) {
+		if (__SVELTEKIT_DEV__ && typeof error == 'object') {
 			error = new Proxy(error, {
 				get: (target, property) => {
 					if (property === 'stack') {
@@ -166,31 +147,23 @@ export function clarify_devalue_error(event, error) {
 	return error.message;
 }
 
-/** @param {import('types').ServerDataNode | import('types').ServerDataSkippedNode | import('types').ServerErrorNode | null} node */
-export function serialize_data_node(node) {
-	if (!node) return 'null';
-
-	if (node.type === 'error' || node.type === 'skip') {
-		return JSON.stringify(node);
-	}
-
-	const stringified = devalue.stringify(node.data);
-
+/**
+ * @param {import('types').ServerDataNode} node
+ */
+export function stringify_uses(node) {
 	const uses = [];
 
-	if (node.uses.dependencies.size > 0) {
+	if (node.uses && node.uses.dependencies.size > 0) {
 		uses.push(`"dependencies":${JSON.stringify(Array.from(node.uses.dependencies))}`);
 	}
 
-	if (node.uses.params.size > 0) {
+	if (node.uses && node.uses.params.size > 0) {
 		uses.push(`"params":${JSON.stringify(Array.from(node.uses.params))}`);
 	}
 
-	if (node.uses.parent) uses.push(`"parent":1`);
-	if (node.uses.route) uses.push(`"route":1`);
-	if (node.uses.url) uses.push(`"url":1`);
+	if (node.uses?.parent) uses.push(`"parent":1`);
+	if (node.uses?.route) uses.push(`"route":1`);
+	if (node.uses?.url) uses.push(`"url":1`);
 
-	return `{"type":"data","data":${stringified},"uses":{${uses.join(',')}}${
-		node.slash ? `,"slash":${JSON.stringify(node.slash)}` : ''
-	}}`;
+	return `"uses":{${uses.join(',')}}`;
 }
